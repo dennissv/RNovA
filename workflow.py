@@ -201,6 +201,11 @@ def parse_args():
         help="Enable UniMod annotation (default)",
         default=False,
     )
+    parser.add_argument(
+        "--refresh-unimod",
+        action="store_true",
+        help="Refresh the cached UniMod XML before annotation",
+    )
     return parser.parse_args()
 
 def main():
@@ -211,8 +216,14 @@ def main():
         stream=sys.stdout,
     )
     args = parse_args()
+    if args.topk_ptm is not None and args.topk_ptm <= 0:
+        raise ValueError("--topk-ptm must be greater than 0")
+
     temp = []
-    for f in glob(args.pep_path):
+    input_files = sorted(glob(args.pep_path))
+    if not input_files:
+        raise FileNotFoundError(f"No peptide path CSV files matched: {args.pep_path}")
+    for f in input_files:
         temp_psm = pd.read_csv(f)
         temp_psm['file_name'] = os.path.basename(f)
         temp.append(temp_psm)
@@ -242,7 +253,7 @@ def main():
         topk = 3
     if args.use_unimod:
         # load UniMod database
-        mods = load_unimod()
+        mods = load_unimod(refresh=args.refresh_unimod)
         index = UniModMassIndex(mods)
 
         # annotate PTMs
@@ -258,4 +269,8 @@ def main():
     print("topk_ptm_annotation:", ";".join(list(ptm_freq_clustered.keys())[:topk]))
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except (FileNotFoundError, RuntimeError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc

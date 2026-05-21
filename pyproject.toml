@@ -1,0 +1,69 @@
+[build-system]
+requires = ["setuptools>=80", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rnova"
+version = "0.1.0"
+description = "Personal monorepo workflow wrapper for RNovA"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+]
+
+[project.optional-dependencies]
+setup = [
+  "cython==3.1.2",
+  "numpy>=2.0",
+  "setuptools>=80",
+]
+workflow = [
+  "numba>=0.61",
+  "numpy>=2.0",
+  "pandas>=2.2",
+  "requests>=2.32",
+  "tqdm>=4.66",
+]
+inference = [
+  "antlr4-python3-runtime==4.9.3",
+  "cython==3.1.2",
+  "einops==0.8.1",
+  "filelock==3.18.0",
+  "fsspec==2025.5.1",
+  "hydra-core==1.3.2",
+  "jinja2==3.1.6",
+  "markupsafe==3.0.2",
+  "mpmath==1.3.0",
+  "networkx>=3.2",
+  "numba>=0.61",
+  "numpy>=2.0",
+  "omegaconf==2.3.0",
+  "packaging==25.0",
+  "pandas>=2.2",
+  "polars==1.30.0",
+  "protobuf==6.31.1",
+  "pyyaml==6.0.2",
+  "requests>=2.32",
+  "setuptools==80.9.0",
+  "sympy==1.14.0",
+  "torch==2.7.1; platform_system == 'Linux'",
+  "tqdm>=4.66",
+  "triton==3.3.1; platform_system == 'Linux'",
+  "typing-extensions==4.14.0",
+]
+flash = [
+  "flash-attn>=2.7; platform_system == 'Linux'",
+]
+
+[project.scripts]
+rnova = "rnova.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["rnova*"]
+
+[dependency-groups]
+dev = [
+  "numpy>=2.0",
+  "pytest>=8.0",
+]

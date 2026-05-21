@@ -1,5 +1,6 @@
 # merge all csv files in RNC-seq
 import argparse
+import csv
 import logging
 import os
 import sys
@@ -8,6 +9,24 @@ import pandas as pd
 from glob import glob
 from pathlib import Path
 from RNovA_SeqFiller_Inference.utils.BasicClass import ResidueOnlyPeptide
+
+try:
+    from rnova.fdr import (
+        FDRComputationError,
+        find_exact_fdr_threshold,
+        parse_score_series,
+        require_columns,
+        require_equal_lengths,
+    )
+except ModuleNotFoundError:
+    sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
+    from rnova.fdr import (
+        FDRComputationError,
+        find_exact_fdr_threshold,
+        parse_score_series,
+        require_columns,
+        require_equal_lengths,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -32,78 +51,84 @@ def main():
     args = parse_args()
     target_directory = Path(args.target_directory)
     decoy_directory = Path(args.decoy_directory)
-    all_csv_files = glob(os.path.join(decoy_directory, '*rnova_denovo_seq.csv'))
+    all_csv_files = sorted(glob(os.path.join(decoy_directory, args.pattern)))
+    if not all_csv_files:
+        raise FDRComputationError(f"No decoy sequence CSV files found in {decoy_directory}")
+
     for ff in all_csv_files:
         logger.info(ff)
         sample = ff.replace('.mgf.decoy_random0.40_rnova_denovo_seq.csv', '')
         sample = sample.replace(str(decoy_directory) + os.sep, '')
         decoy_df = pd.read_csv(ff)
-        target_df = pd.read_csv(str(target_directory / f"{sample}_rnova_denovo_seq.csv"))
-        assert len(decoy_df) ==  len(target_df)
+        target_csv = target_directory / f"{sample}_rnova_denovo_seq.csv"
+        if not target_csv.exists():
+            raise FDRComputationError(f"Missing target sequence CSV for sample {sample}: {target_csv}")
+        target_df = pd.read_csv(str(target_csv))
+        require_columns(target_df.columns, ("title", "sequence", "score"), source=str(target_csv))
+        require_columns(decoy_df.columns, ("title", "sequence", "score"), source=str(ff))
+        require_equal_lengths(len(target_df), len(decoy_df), source=sample)
         tagged = []
-        t_scores = []
-        d_scores = []
-        t_score_sum = []
-        d_score_sum = []
         for idx in range(len(decoy_df)):
             decoy = decoy_df.iloc[idx]
             target = target_df.iloc[idx]
-            if len(decoy) > 2 and len(target) > 2:
-                t_score = [float(i) for i in target['score'].split(';') if i !='-inf']
-                d_score = [float(i) for i in decoy['score'].split(';') if i !='-inf']
-                if sum(t_score) > sum(d_score):
-                    tagged += [(i, 0) for i in t_score]
-                    t_scores += t_score
-                else:
-                    tagged += [(i, 1) for i in d_score]
-                    d_scores += d_score
-        merged  = sorted(tagged, key=lambda t: t[0],reverse=True)
-        tags = [x[1] for x in merged]
-        mid = len(tags) // 2
-        fdr = round(sum(tags[:mid])/len(tags[:mid]),2)
-        while fdr != 0.01:
-            # print(mid)
-            if fdr > 0.01:
-                mid = mid // 2
-            elif fdr < 0.01:
-                mid = mid + mid // 2
-            fdr = round(sum(tags[:mid])/len(tags[:mid]),2)
-        logger.info("Amino Acid level fdr %s model score threshold %s", fdr, merged[mid])
-        threshold_score = merged[mid][0]
+            t_score = parse_score_series(
+                target['score'],
+                source=f"{target_csv} row {idx}",
+                ignore_negative_inf=True,
+            )
+            d_score = parse_score_series(
+                decoy['score'],
+                source=f"{ff} row {idx}",
+                ignore_negative_inf=True,
+            )
+            if sum(t_score) > sum(d_score):
+                tagged += [(i, 0) for i in t_score]
+            else:
+                tagged += [(i, 1) for i in d_score]
+        threshold_score, fdr, threshold_item = find_exact_fdr_threshold(
+            tagged,
+            label=f"{sample} amino-acid-level FDR",
+        )
+        logger.info("Amino Acid level fdr %s model score threshold %s", fdr, threshold_item)
         # whole path fdr
         tagged = []
         for idx in range(len(decoy_df)):
             decoy = decoy_df.iloc[idx]
             target = target_df.iloc[idx]
-            if len(decoy) > 2 and len(target) > 2:
-                t_score =[float(i) for i in target['score'].split(';') if i !='-inf']
-                t_sum = sum([i for i in t_score if i > threshold_score])
-                d_score = [float(i) for i in decoy['score'].split(';') if i !='-inf']
-                d_sum = sum([i for i in d_score if i > threshold_score])
-                if t_sum > d_sum:
-                    tagged.append((t_sum, 0))
-                else:
-                    tagged.append((d_sum, 1))
-        merged  = sorted(tagged, key=lambda t: t[0],reverse=True)
-        # print(merged)
-        tags = [x[1] for x in merged]
-        mid = len(tags) // 2
-        fdr = round(sum(tags[:mid])/len(tags[:mid]),2)
-        # print(fdr)
-        while fdr != 0.01:
-            if fdr > 0.01:
-                mid = mid // 2
-            elif fdr < 0.01:
-                mid = mid + mid // 2
-            fdr = round(sum(tags[:mid])/len(tags[:mid]),2)
-        threshold_path_score = merged[mid][0]
-        path_fdr_result = target_directory / f"{sample}_rnova_denovo_path_node_path001fdr.csv"
+            t_score = parse_score_series(
+                target['score'],
+                source=f"{target_csv} row {idx}",
+                ignore_negative_inf=True,
+            )
+            t_sum = sum([i for i in t_score if i > threshold_score])
+            d_score = parse_score_series(
+                decoy['score'],
+                source=f"{ff} row {idx}",
+                ignore_negative_inf=True,
+            )
+            d_sum = sum([i for i in d_score if i > threshold_score])
+            if t_sum > d_sum:
+                tagged.append((t_sum, 0))
+            else:
+                tagged.append((d_sum, 1))
+        threshold_path_score, _, _ = find_exact_fdr_threshold(
+            tagged,
+            label=f"{sample} sequence path-level FDR",
+        )
+        path_fdr_result = target_directory / f"{sample}_rnova_denovo_path_001fdr.csv"
+        if not path_fdr_result.exists():
+            raise FDRComputationError(f"Missing path FDR result for sample {sample}: {path_fdr_result}")
         path_fdr_result = pd.read_csv(path_fdr_result)
+        require_columns(
+            path_fdr_result.columns,
+            ("scan", "node_mass", "node_score"),
+            source=str(target_directory / f"{sample}_rnova_denovo_path_001fdr.csv"),
+        )
         path_fdr_result = {s:np.array(list(map(float,node.split(';'))))[1:] for s, node in zip(path_fdr_result['scan'],path_fdr_result['node_mass'])}
         # print(len(path_fdr_result))
         new_seq_list = {}
         new_score_list = {}
-        
+
         for _, (i,seq, score) in target_df.iterrows():
             # seq = seq.replace('C[UniMod:4]','C|UniMod:4')
             # seq = seq.replace('M[UniMod:35]','M|UniMod:35')
@@ -117,7 +142,7 @@ def main():
                 # print(merge_flag)
                 seq = ResidueOnlyPeptide(seq).sequence_residue_seq
                 score = np.array(list(map(float,score.split(';'))))
-                
+
                 new_seq = []
                 new_score = []
                 seq_temp = []
@@ -144,10 +169,11 @@ def main():
                 score = np.array(list(map(float,score.split(';'))))
                 new_seq_list[i] = [[s if len(s)==1 else f'{s[0]}[{s[2:]}]' for s in seq]]
                 new_score_list[i] = [score.sum()/len(seq)]
-        
+
         output_path = target_directory / f"{sample}_rnova_denovo_seq001fdr.csv"
-        with open(output_path, 'w') as fw:
-            fw.write('title,sequence,score\n')
+        with open(output_path, 'w', newline='') as fw:
+            writer = csv.writer(fw)
+            writer.writerow(['title', 'sequence', 'score'])
             for i in new_seq_list.keys():
                 seq_per_psm, score_per_psm = new_seq_list[i], new_score_list[i]
                 seq_temp, score_temp = [], []
@@ -168,7 +194,11 @@ def main():
                         scores += score
                 if scores < threshold_path_score:
                     continue
-                fw.write(f"{i},{' '.join(seq_temp)},{';'.join(score_temp)}\n")
+                writer.writerow([i, ' '.join(seq_temp), ';'.join(score_temp)])
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except FDRComputationError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc

@@ -8,15 +8,23 @@ from collections import defaultdict
 import re
 from typing import List, Dict, Any, Optional
 import bisect
+import tempfile
+from pathlib import Path
 
 
-def load_unimod():
-    url = "https://www.unimod.org/xml/unimod.xml"
-    r = requests.get(url, timeout=60)
-    r.raise_for_status()
+UNIMOD_URL = "https://www.unimod.org/xml/unimod.xml"
+UNIMOD_CACHE_PATH = Path(__file__).resolve().parents[1] / ".cache" / "rnova" / "unimod.xml"
+UNIMOD_TIMEOUT_SECONDS = 60
+
+
+def load_unimod(cache_path: str | Path | None = None, refresh: bool = False):
+    xml_bytes = _load_unimod_xml(
+        Path(cache_path) if cache_path is not None else UNIMOD_CACHE_PATH,
+        refresh=refresh,
+    )
 
     mods = []
-    for _, elem in ET.iterparse(BytesIO(r.content), events=("end",)):
+    for _, elem in ET.iterparse(BytesIO(xml_bytes), events=("end",)):
         # elem.tag will look like "{namespace}mod", not "mod"
         if elem.tag.endswith("mod"):
             delta = None
@@ -49,6 +57,40 @@ def load_unimod():
             elem.clear()
 
     return mods
+
+
+def _load_unimod_xml(cache_path: Path, *, refresh: bool = False) -> bytes:
+    cache_path = cache_path.expanduser().resolve()
+    if cache_path.exists() and not refresh:
+        return cache_path.read_bytes()
+
+    try:
+        response = requests.get(UNIMOD_URL, timeout=UNIMOD_TIMEOUT_SECONDS)
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        raise RuntimeError(
+            "Could not download UniMod XML. Check network access or run once with "
+            f"a reachable {UNIMOD_URL} to populate {cache_path}."
+        ) from exc
+
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = tempfile.NamedTemporaryFile(
+        prefix=".unimod-",
+        suffix=".xml.tmp",
+        dir=cache_path.parent,
+        delete=False,
+    )
+    tmp_path = Path(handle.name)
+    try:
+        with handle:
+            handle.write(response.content)
+        tmp_path.replace(cache_path)
+    except Exception:
+        if tmp_path.exists():
+            tmp_path.unlink()
+        raise
+
+    return response.content
 
 
 class UniModMassIndex:

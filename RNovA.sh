@@ -34,33 +34,14 @@ if [[ "$useunimod" != "true" && "$useunimod" != "false" ]]; then
   exit 1
 fi
 
-decoy_dir="$in_dir/decoy_mgf"
-mkdir -p "$decoy_dir"
-
-echo "Step 1/6: Generating decoy MGF files..."
-python decoy_spectrum_generator.py "$in_dir" "$decoy_dir"
-
-echo "Step 2/6: Running PathSearcher inference..."
-pushd RNovA_PathSearcher_Inference >/dev/null
-python Inference_Node.py "$in_dir"/*.mgf "$decoy_dir"/*.mgf
-popd >/dev/null
-
-echo "Step 3/6: Running FDR stage 1..."
-python FDR_stage1.py "$in_dir" "$decoy_dir"
-
-workflow_args=(--topk-ptm "$k")
+args=(rnova run "$in_dir" --top-k-ptms "$k")
 if [[ "$useunimod" == "true" ]]; then
-  workflow_args=(--use-unimod --topk-ptm "$k")
+  args+=(--use-unimod)
 fi
-echo "Step 4/6: Running clustering and alignment to get top-k PTMs..."
-topk_ptm=$(python workflow.py "$in_dir"/*_rnova_denovo_path_node_path001fdr.csv "${workflow_args[@]}" \
-  | tee /dev/stderr \
-  | awk -F': ' '/^topk_ptm_annotation: /{print $2}')
 
-echo "Step 5/6: Running SeqFiller inference... topk_ptm=${topk_ptm}"
-pushd RNovA_SeqFiller_Inference >/dev/null
-python Inference_Sequence.py "$in_dir"/*.mgf "$decoy_dir"/*.mgf \
-  "A;C|UniMod:4;D;E;F;G;H;K;L;M;N;P;Q;R;S;T;V;W;Y;${topk_ptm}"
-popd >/dev/null
-echo "Step 6/6: Running FDR stage 2..."
-python FDR-stage2.py "$in_dir" "$decoy_dir"
+if ! command -v uv >/dev/null 2>&1; then
+  echo "error: uv is required. Install uv, then run: uv sync" >&2
+  exit 1
+fi
+
+uv run "${args[@]}"
