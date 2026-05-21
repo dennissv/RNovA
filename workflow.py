@@ -9,8 +9,6 @@ import re
 from glob import glob
 from pathlib import Path
 
-from src.null_background_ngram import build_null_distribution
-from src.clustering import cdhit_style_cluster_numba_masstag, nw_masstag_numba
 from src.alignment import *
 from src.fill_PTM import (
     UniModMassIndex,
@@ -21,7 +19,6 @@ from src.fill_PTM import (
 from src.DBSCAN1D import DBSCAN1D
 import numpy as np
 import pandas as pd
-import numba
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +30,9 @@ def build_cluster(
     null_workers: int = 1,
     show_progress: bool = True,
 ):
+    import numba
+    from src.clustering import cdhit_style_cluster_numba_masstag
+
     temp = in_csv
     nodes_mass = numba.typed.List()
     for s in temp['node_mass']:
@@ -98,6 +98,9 @@ def _load_or_build_null_distribution(
     null_workers: int,
     show_progress: bool,
 ):
+    from src.clustering import nw_masstag_numba
+    from src.null_background_ngram import build_null_distribution
+
     cache_path = _null_distribution_cache_path(cache_dir, temp, null_params) if cache_dir else None
     if cache_path is not None and cache_path.exists() and not refresh_cache:
         logger.info("Loading cached null distribution from %s", cache_path)
