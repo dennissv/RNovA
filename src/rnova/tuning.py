@@ -57,10 +57,6 @@ def run_tuning(
 
     device = cuda_device_info()
     total_memory_gib = device.get("total_memory_gib") if device.get("available") else None
-    candidates = candidate_batch_sizes(total_memory_gib)
-    if not candidates:
-        raise RNovAError("Could not choose candidate batch sizes for tuning")
-
     base_settings = resolve_runtime_settings(
         input_path,
         speed_profile=speed_profile,
@@ -76,6 +72,17 @@ def run_tuning(
     sampled = _write_sample_mgf(mgf_files, sample_mgf, sample_spectra)
     if sampled == 0:
         raise RNovAError("Tuning sample did not contain any spectra")
+    candidates, skipped_candidates = _candidate_batch_sizes_for_sample(
+        sampled,
+        total_memory_gib=total_memory_gib,
+    )
+    print(f"Tuning candidates: {', '.join(map(str, candidates))}", flush=True)
+    if skipped_candidates:
+        skipped = ", ".join(map(str, skipped_candidates))
+        print(
+            f"Skipping candidate batch size(s) {skipped}; sample only has {sampled} spectra.",
+            flush=True,
+        )
 
     benchmark_results: list[dict[str, Any]] = []
     path_results = _benchmark_stage_candidates(
@@ -158,6 +165,22 @@ def run_tuning(
         max_memory_frac=max_memory_frac,
         tuning_path=tuning_path,
     )
+
+
+def _candidate_batch_sizes_for_sample(
+    sampled: int,
+    *,
+    total_memory_gib: float | None,
+) -> tuple[list[int], list[int]]:
+    candidates = candidate_batch_sizes(total_memory_gib)
+    selected = [candidate for candidate in candidates if candidate <= sampled]
+    skipped = [candidate for candidate in candidates if candidate > sampled]
+    if not selected:
+        first_candidate = candidates[0] if candidates else "the first candidate batch size"
+        raise RNovAError(
+            f"--sample-spectra must be at least {first_candidate} to tune the current batch ladder"
+        )
+    return selected, skipped
 
 
 def _benchmark_stage_candidates(

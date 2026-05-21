@@ -102,6 +102,9 @@ uv run rnova tune /path/to/mgf-data --sample-spectra 64 --max-memory-frac 0.85
 The tuning result is cached in `.cache/rnova/tuning.json`. Future `rnova run`
 commands use it unless you pass explicit batch/worker options. Use `--retune`
 on `rnova run` to refresh the cache before starting a real workflow run.
+The tuner only benchmarks candidate batch sizes that fit inside the sampled
+spectra count, so use at least `--sample-spectra 128` if you want to test the
+full `8, 16, 32, 64, 128` ladder.
 
 6. Run the workflow:
 
@@ -239,6 +242,12 @@ batch sizes on PathSearcher and SeqFiller, rejects settings that exceed the
 requested peak memory fraction, and stores the selected settings in
 `.cache/rnova/tuning.json`. It does not change model weights, workflow stages,
 FDR, clustering, PTM logic, or output filenames.
+
+The current tuning ladder is `8, 16, 32, 64, 128`. Candidate batches larger
+than `--sample-spectra` are skipped because a smaller sample cannot actually
+form those batch sizes. GPU memory can still rise as `--sample-spectra`
+increases because larger samples expose larger padded spectrum batches and the
+inference prefetcher keeps the next batch resident on CUDA during processing.
 
 The workflow runs:
 

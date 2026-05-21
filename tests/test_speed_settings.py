@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
+from rnova.errors import RNovAError
 from rnova.speed import (
     RuntimeSettings,
     batch_size_for_gpu_memory,
@@ -10,7 +13,11 @@ from rnova.speed import (
     resolve_runtime_settings,
     save_tuning,
 )
-from rnova.tuning import _choose_best_stage_result, _format_tuning_failure
+from rnova.tuning import (
+    _candidate_batch_sizes_for_sample,
+    _choose_best_stage_result,
+    _format_tuning_failure,
+)
 
 
 MGF = """BEGIN IONS
@@ -121,6 +128,18 @@ def test_tuning_failure_message_includes_stage_details(tmp_path: Path) -> None:
     assert "SeqFiller attempts:" in message
     assert "batch 1: ok" in message
     assert "Full tuning details:" in message
+
+
+def test_tuning_candidates_skip_batches_larger_than_sample() -> None:
+    selected, skipped = _candidate_batch_sizes_for_sample(32, total_memory_gib=12)
+
+    assert selected == [8, 16, 32]
+    assert skipped == [64, 128]
+
+
+def test_tuning_candidates_require_enough_sample_spectra() -> None:
+    with pytest.raises(RNovAError, match="--sample-spectra must be at least 8"):
+        _candidate_batch_sizes_for_sample(7, total_memory_gib=12)
 
 
 def _input_dir(tmp_path: Path) -> Path:
