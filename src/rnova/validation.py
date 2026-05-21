@@ -139,21 +139,28 @@ def collect_checks(
 
     for import_name in imports:
         if importlib.util.find_spec(import_name) is None:
-            checks.append(Check(f"Import {import_name}", "fail", "not installed"))
+            checks.append(Check(f"Import {import_name}", "fail", _missing_import_detail(import_name, mode)))
         else:
             checks.append(Check(f"Import {import_name}", "ok", "available"))
 
     if mode == "inference":
         flash_status = "ok" if importlib.util.find_spec("flash_attn") else "fail"
         flash_detail = "available" if flash_status == "ok" else (
-            "missing; install with `MAX_JOBS=4 uv pip install flash-attn --no-build-isolation` "
-            "if your CUDA/PyTorch stack supports it"
+            "missing; run `uv sync --extra inference --extra flash --locked` on the GPU workstation. "
+            "If only flash-attn failed to build, try `MAX_JOBS=4 uv pip install flash-attn --no-build-isolation`."
         )
         checks.append(Check("Import flash_attn", flash_status, flash_detail))
 
         torch_spec = importlib.util.find_spec("torch")
         if torch_spec is None:
-            checks.append(Check("CUDA", "fail", "torch is not installed"))
+            checks.append(
+                Check(
+                    "CUDA",
+                    "fail",
+                    "torch is not installed; plain `uv sync` prunes optional inference packages. "
+                    "Run `uv sync --extra inference --extra flash --locked`.",
+                )
+            )
         else:
             try:
                 torch = importlib.import_module("torch")
@@ -226,6 +233,17 @@ def print_checks(checks: list[Check]) -> None:
     for check in checks:
         marker = {"ok": "OK", "warn": "WARN", "fail": "FAIL"}[check.status]
         print(f"[{marker}] {check.name}: {check.detail}")
+
+
+def _missing_import_detail(import_name: str, mode: str) -> str:
+    if mode == "inference":
+        return (
+            "not installed; run `uv sync --extra inference --extra flash --locked` on the GPU workstation. "
+            "Plain `uv sync` intentionally prunes optional inference packages."
+        )
+    if mode == "workflow":
+        return "not installed; run `uv sync --extra workflow --locked`"
+    return "not installed"
 
 
 def _invalid_mgf_details(mgf_files: list[Path]) -> list[str]:

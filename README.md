@@ -20,7 +20,7 @@ uv run rnova run ./data --use-unimod --top-k-ptms 10 --dry-run
 For real inference, use Linux/WSL/Ubuntu with an NVIDIA GPU, CUDA-visible PyTorch, and FlashAttention:
 
 ```bash
-uv sync --extra inference --extra flash
+uv sync --extra inference --extra flash --locked
 uv run rnova download-checkpoints
 uv run rnova setup
 uv run rnova doctor --mode inference ./data
@@ -56,8 +56,16 @@ nvidia-smi
 ```bash
 git clone https://github.com/dennissv/RNovA.git
 cd RNovA
-uv sync --extra inference --extra flash
+uv sync --extra inference --extra flash --locked
 ```
+
+Important: plain `uv sync` intentionally creates the lightweight laptop/dev
+environment. On a GPU workstation, running plain `uv sync` after installing the
+inference extras will prune optional packages such as `torch`, `triton`, and
+`flash-attn`. Use `uv sync --extra inference --extra flash --locked` whenever
+you want the real inference environment. If you need to sync without pruning
+already-installed optional packages, uv also supports `uv sync --inexact`, but
+the explicit extras command is the recommended workstation workflow.
 
 If FlashAttention fails to build in your CUDA/PyTorch stack, try:
 
@@ -69,7 +77,7 @@ The root `pyproject.toml` also declares uv build overrides for `flash-attn`
 so its isolated build environment receives the same `torch` version that the
 runtime environment will use, plus `packaging` and `ninja`. That avoids the
 common `ModuleNotFoundError: No module named 'torch'` failure during
-`uv sync --extra inference --extra flash`.
+`uv sync --extra inference --extra flash --locked`.
 
 4. Install checkpoints and build the SeqFiller extension:
 
