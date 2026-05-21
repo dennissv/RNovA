@@ -5,10 +5,12 @@ from pathlib import Path
 from rnova.speed import (
     RuntimeSettings,
     batch_size_for_gpu_memory,
+    candidate_batch_sizes,
     load_tuning,
     resolve_runtime_settings,
     save_tuning,
 )
+from rnova.tuning import _choose_best_stage_result, _format_tuning_failure
 
 
 MGF = """BEGIN IONS
@@ -26,6 +28,10 @@ def test_batch_size_for_desktop_gpu_memory_tiers() -> None:
     assert batch_size_for_gpu_memory(20) == 16
     assert batch_size_for_gpu_memory(24) == 32
     assert batch_size_for_gpu_memory(None) == 8
+
+
+def test_tuning_candidates_include_small_escape_hatch_batches() -> None:
+    assert candidate_batch_sizes(12) == [1, 2, 4, 8]
 
 
 def test_resolve_runtime_settings_uses_auto_defaults(monkeypatch, tmp_path: Path) -> None:
@@ -86,6 +92,35 @@ def test_tuning_cache_is_used_and_explicit_values_win(monkeypatch, tmp_path: Pat
     assert overridden.path_batch_size == 4
     assert overridden.seq_batch_size == 12
     assert overridden.seq_num_workers == 3
+
+
+def test_tuning_selects_best_stage_independently() -> None:
+    results = [
+        {"status": "ok", "batch_size": 1, "spectra_per_second": 1.0, "peak_memory_gib": 2.0},
+        {"status": "failed", "batch_size": 2, "stderr": "boom"},
+        {"status": "ok", "batch_size": 4, "spectra_per_second": 3.0, "peak_memory_gib": 5.0},
+    ]
+
+    best = _choose_best_stage_result(results, total_memory_gib=12, max_memory_frac=0.85)
+
+    assert best is not None
+    assert best["batch_size"] == 4
+
+
+def test_tuning_failure_message_includes_stage_details(tmp_path: Path) -> None:
+    message = _format_tuning_failure(
+        [{"status": "failed", "batch_size": 1, "stderr": "Traceback\nCUDA OOM"}],
+        [{"status": "ok", "batch_size": 1, "spectra_per_second": 2.0, "peak_memory_gib": 11.0}],
+        failure_path=tmp_path / "tuning_failure.json",
+        total_memory_gib=12,
+        max_memory_frac=0.85,
+    )
+
+    assert "PathSearcher attempts:" in message
+    assert "batch 1: failed (CUDA OOM)" in message
+    assert "SeqFiller attempts:" in message
+    assert "batch 1: ok" in message
+    assert "Full tuning details:" in message
 
 
 def _input_dir(tmp_path: Path) -> Path:
