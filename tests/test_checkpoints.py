@@ -49,6 +49,26 @@ def test_extract_checkpoints_places_exact_members_atomically(tmp_path) -> None:
     assert not list(repo_root.rglob(".rnova-*.tmp"))
 
 
+def test_extract_checkpoints_accepts_zenodo_archive_layout(tmp_path) -> None:
+    archive = tmp_path / "RNovA_Checkpoint.zip"
+    repo_root = tmp_path / "repo"
+    _write_checkpoint_zip(
+        archive,
+        {
+            "RNovA_Checkpoint/": b"",
+            "RNovA_Checkpoint/PathSearcher/": b"",
+            "RNovA_Checkpoint/PathSearcher/rnova.pt": b"path",
+            "RNovA_Checkpoint/SeqFiller/": b"",
+            "RNovA_Checkpoint/SeqFiller/rnova.pt": b"seq",
+        },
+    )
+
+    checkpoints.extract_checkpoints(archive, repo_root=repo_root)
+
+    assert (repo_root / "RNovA_PathSearcher_Inference/save/rnova.pt").read_bytes() == b"path"
+    assert (repo_root / "RNovA_SeqFiller_Inference/save/rnova.pt").read_bytes() == b"seq"
+
+
 def test_download_checkpoints_refuses_unverified_local_archive(tmp_path) -> None:
     archive = tmp_path / "RNovA_Checkpoint.zip"
     _write_checkpoint_zip(

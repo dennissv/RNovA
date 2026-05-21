@@ -31,16 +31,20 @@ PROGRESS_INTERVAL_BYTES = 50 * 1024 * 1024
 CHECKPOINT_MEMBER_CANDIDATES = {
     "pathsearcher": (
         "RNovA_PathSearcher_Inference/save/rnova.pt",
+        "PathSearcher/rnova.pt",
         "PathSearcher/save/rnova.pt",
         "RNovA_PathSearcher/save/rnova.pt",
+        "RNovA_Checkpoint/PathSearcher/rnova.pt",
         "RNovA_Checkpoint/RNovA_PathSearcher_Inference/save/rnova.pt",
         "RNovA_Checkpoint/PathSearcher/save/rnova.pt",
         "RNovA_Checkpoint/RNovA_PathSearcher/save/rnova.pt",
     ),
     "seqfiller": (
         "RNovA_SeqFiller_Inference/save/rnova.pt",
+        "SeqFiller/rnova.pt",
         "SeqFiller/save/rnova.pt",
         "RNovA_SeqFiller/save/rnova.pt",
+        "RNovA_Checkpoint/SeqFiller/rnova.pt",
         "RNovA_Checkpoint/RNovA_SeqFiller_Inference/save/rnova.pt",
         "RNovA_Checkpoint/SeqFiller/save/rnova.pt",
         "RNovA_Checkpoint/RNovA_SeqFiller/save/rnova.pt",
