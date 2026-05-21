@@ -6,21 +6,21 @@ The recommended entry point is the root `rnova` CLI.
 
 ## Quick Start
 
-On any machine, including a non-GPU laptop, the lightweight workflow should work:
+On a Linux/WSL/Ubuntu workstation, plain `uv sync` installs the full RNovA
+runtime, including PyTorch, Triton, and FlashAttention:
 
 ```bash
 git clone https://github.com/dennissv/RNovA.git
 cd RNovA
-uv sync
+uv sync --locked
 uv run rnova --help
 uv run rnova doctor --mode dry-run ./data
 uv run rnova run ./data --use-unimod --top-k-ptms 10 --dry-run
 ```
 
-For real inference, use Linux/WSL/Ubuntu with an NVIDIA GPU, CUDA-visible PyTorch, and FlashAttention:
+For real inference, use Linux/WSL/Ubuntu with an NVIDIA GPU and CUDA-visible PyTorch:
 
 ```bash
-uv sync --extra inference --extra flash --locked
 uv run rnova download-checkpoints
 uv run rnova setup
 uv run rnova doctor --mode inference ./data
@@ -45,7 +45,7 @@ sudo apt install -y git build-essential python3-dev
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-2. Confirm the GPU is visible before installing the heavy extras:
+2. Confirm the GPU is visible before syncing the environment:
 
 ```bash
 nvidia-smi
@@ -56,16 +56,22 @@ nvidia-smi
 ```bash
 git clone https://github.com/dennissv/RNovA.git
 cd RNovA
-uv sync --extra inference --extra flash --locked
+uv sync --locked
 ```
 
-Important: plain `uv sync` intentionally creates the lightweight laptop/dev
-environment. On a GPU workstation, running plain `uv sync` after installing the
-inference extras will prune optional packages such as `torch`, `triton`, and
-`flash-attn`. Use `uv sync --extra inference --extra flash --locked` whenever
-you want the real inference environment. If you need to sync without pruning
-already-installed optional packages, uv also supports `uv sync --inexact`, but
-the explicit extras command is the recommended workstation workflow.
+Important: `uv sync` is now intentionally workstation-oriented. On Linux it
+installs PyTorch, Triton, and FlashAttention by default. On macOS/non-Linux
+machines, Linux-only GPU packages are skipped by environment markers, so CLI
+help, doctor, tests, and dry-runs still work.
+
+If you need a Linux test-only sync that deliberately avoids GPU packages, use:
+
+```bash
+uv sync --locked \
+  --no-install-package torch \
+  --no-install-package triton \
+  --no-install-package flash-attn
+```
 
 If FlashAttention fails to build in your CUDA/PyTorch stack, try:
 
@@ -77,7 +83,7 @@ The root `pyproject.toml` also declares uv build overrides for `flash-attn`
 so its isolated build environment receives the same `torch` version that the
 runtime environment will use, plus `packaging` and `ninja`. That avoids the
 common `ModuleNotFoundError: No module named 'torch'` failure during
-`uv sync --extra inference --extra flash --locked`.
+`uv sync --locked`.
 
 4. Install checkpoints and build the SeqFiller extension:
 
@@ -169,10 +175,13 @@ cd RNovA_SeqFiller_Inference
 python setup.py build_ext --inplace
 ```
 
-If you only want to build this extension without the full inference stack:
+If you are on a Linux test-only machine and intentionally skipped GPU packages:
 
 ```bash
-uv sync --extra setup
+uv sync --locked \
+  --no-install-package torch \
+  --no-install-package triton \
+  --no-install-package flash-attn
 uv run rnova setup
 ```
 
@@ -280,7 +289,7 @@ Before pushing a release branch:
 
 ```bash
 uv --cache-dir .cache/uv lock --check
-uv --cache-dir .cache/uv run pytest -q
+uv --cache-dir .cache/uv run --no-sync pytest -q
 uv --cache-dir .cache/uv run rnova doctor --mode dry-run ./data
 uv --cache-dir .cache/uv run rnova run ./data --dry-run --use-unimod --top-k-ptms 10
 ```
@@ -288,7 +297,7 @@ uv --cache-dir .cache/uv run rnova run ./data --dry-run --use-unimod --top-k-ptm
 ## Notes
 
 - This repository vendors the former PathSearcher and SeqFiller submodules as normal directories for simpler personal use.
-- Default `uv sync` is intentionally lightweight so CLI help, doctor, and dry-runs work on non-GPU laptops. Install `--extra inference --extra flash` only on the Linux/GPU machine where you plan to run the models.
+- Default `uv sync` is intentionally workstation-oriented. Linux installs the inference stack; non-Linux machines skip Linux-only GPU packages.
 - The root CLI uses absolute paths when invoking module scripts, so `./data` remains valid even when a stage runs from inside a module directory.
 
 ## Troubleshooting GPU Stalls

@@ -146,7 +146,7 @@ def collect_checks(
     if mode == "inference":
         flash_status = "ok" if importlib.util.find_spec("flash_attn") else "fail"
         flash_detail = "available" if flash_status == "ok" else (
-            "missing; run `uv sync --extra inference --extra flash --locked` on the GPU workstation. "
+            "missing; run `uv sync --locked` on the GPU workstation. "
             "If only flash-attn failed to build, try `MAX_JOBS=4 uv pip install flash-attn --no-build-isolation`."
         )
         checks.append(Check("Import flash_attn", flash_status, flash_detail))
@@ -157,8 +157,8 @@ def collect_checks(
                 Check(
                     "CUDA",
                     "fail",
-                    "torch is not installed; plain `uv sync` prunes optional inference packages. "
-                    "Run `uv sync --extra inference --extra flash --locked`.",
+                    "torch is not installed; run `uv sync --locked` on the GPU workstation. "
+                    "If this is a test-only sync that intentionally skipped GPU packages, use dry-run or workflow mode.",
                 )
             )
         else:
@@ -238,11 +238,11 @@ def print_checks(checks: list[Check]) -> None:
 def _missing_import_detail(import_name: str, mode: str) -> str:
     if mode == "inference":
         return (
-            "not installed; run `uv sync --extra inference --extra flash --locked` on the GPU workstation. "
-            "Plain `uv sync` intentionally prunes optional inference packages."
+            "not installed; run `uv sync --locked` on the GPU workstation. "
+            "If this is a test-only sync that intentionally skipped GPU packages, use dry-run or workflow mode."
         )
     if mode == "workflow":
-        return "not installed; run `uv sync --extra workflow --locked`"
+        return "not installed; run `uv sync --locked`"
     return "not installed"
 
 

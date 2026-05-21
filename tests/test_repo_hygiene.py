@@ -54,6 +54,17 @@ def test_flash_attn_build_dependencies_are_declared() -> None:
     assert '"ninja"' in pyproject
 
 
+def test_gpu_runtime_dependencies_are_default_workstation_dependencies() -> None:
+    root = Path(__file__).resolve().parents[1]
+    pyproject = (root / "pyproject.toml").read_text()
+
+    project_dependencies = pyproject.split("[project.optional-dependencies]", 1)[0]
+
+    assert '"torch==2.7.1; platform_system == \'Linux\'"' in project_dependencies
+    assert '"triton==3.3.1; platform_system == \'Linux\'"' in project_dependencies
+    assert '"flash-attn>=2.7; platform_system == \'Linux\'"' in project_dependencies
+
+
 def _is_banned(path: Path) -> bool:
     if path.name in BANNED_NAMES:
         return True
