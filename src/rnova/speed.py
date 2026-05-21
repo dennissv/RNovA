@@ -233,8 +233,7 @@ def cuda_device_info() -> dict[str, Any]:
 
 
 def candidate_batch_sizes(total_memory_gib: float | None = None) -> list[int]:
-    max_batch = batch_size_for_gpu_memory(total_memory_gib)
-    return [value for value in (1, 2, 4, 8, 16, 32) if value <= max_batch]
+    return [4, 8, 16, 32, 64]
 
 
 def _resolve_auto_int(

@@ -30,8 +30,8 @@ def test_batch_size_for_desktop_gpu_memory_tiers() -> None:
     assert batch_size_for_gpu_memory(None) == 8
 
 
-def test_tuning_candidates_include_small_escape_hatch_batches() -> None:
-    assert candidate_batch_sizes(12) == [1, 2, 4, 8]
+def test_tuning_candidates_use_desktop_scan_ladder() -> None:
+    assert candidate_batch_sizes(12) == [4, 8, 16, 32, 64]
 
 
 def test_resolve_runtime_settings_uses_auto_defaults(monkeypatch, tmp_path: Path) -> None:
