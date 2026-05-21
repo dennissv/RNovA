@@ -42,6 +42,18 @@ def test_generated_artifacts_are_not_trackable() -> None:
     assert offenders == []
 
 
+def test_flash_attn_build_dependencies_are_declared() -> None:
+    root = Path(__file__).resolve().parents[1]
+    pyproject = (root / "pyproject.toml").read_text()
+
+    assert "[tool.uv.extra-build-dependencies]" in pyproject
+    assert "flash-attn" in pyproject
+    assert 'requirement = "torch"' in pyproject
+    assert "match-runtime = true" in pyproject
+    assert '"packaging"' in pyproject
+    assert '"ninja"' in pyproject
+
+
 def _is_banned(path: Path) -> bool:
     if path.name in BANNED_NAMES:
         return True

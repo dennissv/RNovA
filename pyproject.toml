@@ -55,6 +55,14 @@ flash = [
   "flash-attn>=2.7; platform_system == 'Linux'",
 ]
 
+[tool.uv.extra-build-dependencies]
+# flash-attn imports torch while building; keep its build torch aligned with runtime torch.
+flash-attn = [
+  { requirement = "torch", match-runtime = true },
+  "packaging",
+  "ninja",
+]
+
 [project.scripts]
 rnova = "rnova.cli:main"
 

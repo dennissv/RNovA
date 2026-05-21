@@ -63,6 +63,12 @@ If FlashAttention fails to build in your CUDA/PyTorch stack, try:
 MAX_JOBS=4 uv pip install flash-attn --no-build-isolation
 ```
 
+The root `pyproject.toml` also declares uv build overrides for `flash-attn`
+so its isolated build environment receives the same `torch` version that the
+runtime environment will use, plus `packaging` and `ninja`. That avoids the
+common `ModuleNotFoundError: No module named 'torch'` failure during
+`uv sync --extra inference --extra flash`.
+
 4. Install checkpoints and build the SeqFiller extension:
 
 ```bash
