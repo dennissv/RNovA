@@ -13,7 +13,7 @@ SPEED_PROFILES = ("fast", "exact", "max")
 PROGRESS_MODES = ("auto", "on", "off")
 LOG_LEVELS = ("warning", "info", "debug")
 PATH_CACHE_POLICIES = ("auto", "legacy")
-TUNING_VERSION = 1
+TUNING_VERSION = 2
 DEFAULT_TUNING_PATH = Path(__file__).resolve().parents[2] / ".cache" / "rnova" / "tuning.json"
 
 
@@ -74,6 +74,7 @@ def save_tuning(
     benchmark_results: list[dict[str, Any]],
     device: dict[str, Any] | None = None,
     sample_spectra: int | None = None,
+    sample_summary: dict[str, Any] | None = None,
     max_memory_frac: float | None = None,
     tuning_path: Path = DEFAULT_TUNING_PATH,
 ) -> Path:
@@ -89,6 +90,7 @@ def save_tuning(
         "benchmark_results": benchmark_results,
         "device": device or {},
         "sample_spectra": sample_spectra,
+        "sample_summary": sample_summary or {},
         "max_memory_frac": max_memory_frac,
     }
     tuning_path.parent.mkdir(parents=True, exist_ok=True)

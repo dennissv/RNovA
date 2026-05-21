@@ -8,7 +8,7 @@ from .checkpoints import download_checkpoints
 from .errors import RNovAError
 from .pipeline import run_pipeline, setup_seqfiller_extension
 from .speed import LOG_LEVELS, PATH_CACHE_POLICIES, PROGRESS_MODES, SPEED_PROFILES
-from .tuning import run_tuning
+from .tuning import SAMPLE_STRATEGIES, run_tuning
 from .validation import VALID_DOCTOR_MODES, collect_checks, print_checks
 
 
@@ -100,6 +100,12 @@ def build_parser() -> argparse.ArgumentParser:
     tune_parser = subparsers.add_parser("tune", help="Benchmark small GPU samples and cache run settings")
     tune_parser.add_argument("input_dir", help="Directory containing input .mgf files")
     tune_parser.add_argument("--sample-spectra", type=int, default=64, help="Number of spectra to sample")
+    tune_parser.add_argument(
+        "--sample-strategy",
+        choices=SAMPLE_STRATEGIES,
+        default="representative",
+        help="Tuning sample selection strategy (default: representative)",
+    )
     tune_parser.add_argument(
         "--max-memory-frac",
         type=float,
@@ -206,6 +212,7 @@ def _tune(args: argparse.Namespace) -> None:
         progress=args.progress,
         log_level=args.log_level,
         path_cache_policy=args.path_cache_policy,
+        sample_strategy=args.sample_strategy,
     )
     print(f"Tuning saved: {tuning_path}")
 

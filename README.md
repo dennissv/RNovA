@@ -105,6 +105,8 @@ on `rnova run` to refresh the cache before starting a real workflow run.
 The tuner only benchmarks candidate batch sizes that fit inside the sampled
 spectra count, so use at least `--sample-spectra 128` if you want to test the
 full `8, 16, 32, 64, 128` ladder.
+By default, tuning uses a representative sample that includes the largest
+spectra by raw peak count instead of only the first spectra in the file.
 
 6. Run the workflow:
 
@@ -248,6 +250,10 @@ than `--sample-spectra` are skipped because a smaller sample cannot actually
 form those batch sizes. GPU memory can still rise as `--sample-spectra`
 increases because larger samples expose larger padded spectrum batches and the
 inference prefetcher keeps the next batch resident on CUDA during processing.
+On WSL, `nvidia-smi` usually tracks PyTorch reserved CUDA memory more closely
+than allocated tensor memory, so tuning rejects settings using peak reserved
+memory. Use `--sample-strategy first` only when you intentionally want the old
+first-N-spectra behavior.
 
 The workflow runs:
 

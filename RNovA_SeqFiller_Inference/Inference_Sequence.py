@@ -185,12 +185,16 @@ def main(argv=None):
         logger.info("Results saved to %s_rnova_denovo_seq.csv", mgf_file[:-4])
 
     elapsed = time.perf_counter() - started_at
+    peak_allocated_gib = _peak_memory_allocated_gib(local_rank)
+    peak_reserved_gib = _peak_memory_reserved_gib(local_rank)
     metrics = {
         "stage": "seqfiller",
         "elapsed_seconds": elapsed,
         "spectra": total_spectra,
         "spectra_per_second": total_spectra / elapsed if elapsed > 0 else 0.0,
-        "peak_memory_gib": _peak_memory_gib(local_rank),
+        "peak_memory_gib": max(peak_allocated_gib, peak_reserved_gib),
+        "peak_memory_allocated_gib": peak_allocated_gib,
+        "peak_memory_reserved_gib": peak_reserved_gib,
         "batch_size": cfg.train.batch_size,
         "num_workers": args.num_workers,
         "speed_profile": args.speed_profile,
@@ -198,7 +202,10 @@ def main(argv=None):
     if args.benchmark_json:
         Path(args.benchmark_json).write_text(json.dumps(metrics, indent=2, sort_keys=True) + "\n")
     else:
-        print(f"SeqFiller wrote {output_files} file(s) for {total_spectra} spectra.")
+        print(
+            f"SeqFiller wrote {output_files} file(s) for {total_spectra} spectra. "
+            f"Peak CUDA reserved {peak_reserved_gib:.2f} GiB, allocated {peak_allocated_gib:.2f} GiB."
+        )
 
 
 def _progress_enabled(progress: str) -> bool:
@@ -227,11 +234,19 @@ def _reset_peak_memory_stats(device: int) -> None:
         logger.debug("Could not reset CUDA peak memory stats for device %s: %s", device, exc)
 
 
-def _peak_memory_gib(device: int) -> float:
+def _peak_memory_allocated_gib(device: int) -> float:
     try:
         return torch.cuda.max_memory_allocated(device) / 1024**3
     except RuntimeError as exc:
-        logger.debug("Could not read CUDA peak memory stats for device %s: %s", device, exc)
+        logger.debug("Could not read CUDA allocated peak memory for device %s: %s", device, exc)
+        return 0.0
+
+
+def _peak_memory_reserved_gib(device: int) -> float:
+    try:
+        return torch.cuda.max_memory_reserved(device) / 1024**3
+    except RuntimeError as exc:
+        logger.debug("Could not read CUDA reserved peak memory for device %s: %s", device, exc)
         return 0.0
 
 

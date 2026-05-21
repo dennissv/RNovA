@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from rnova.errors import RNovAError
+from rnova.mgf import MGFSpectrumBlock, MGFPeak
 from rnova.speed import (
     RuntimeSettings,
     batch_size_for_gpu_memory,
@@ -14,9 +15,11 @@ from rnova.speed import (
     save_tuning,
 )
 from rnova.tuning import (
+    _BlockCandidate,
     _candidate_batch_sizes_for_sample,
     _choose_best_stage_result,
     _format_tuning_failure,
+    _select_sample_blocks,
 )
 
 
@@ -142,8 +145,55 @@ def test_tuning_candidates_require_enough_sample_spectra() -> None:
         _candidate_batch_sizes_for_sample(7, total_memory_gib=12)
 
 
+def test_representative_tuning_sample_includes_heavy_spectra(tmp_path: Path) -> None:
+    candidates = [
+        _block_candidate(tmp_path, ordinal=0, peak_count=10),
+        _block_candidate(tmp_path, ordinal=1, peak_count=300),
+        _block_candidate(tmp_path, ordinal=2, peak_count=20),
+        _block_candidate(tmp_path, ordinal=3, peak_count=250),
+        _block_candidate(tmp_path, ordinal=4, peak_count=30),
+        _block_candidate(tmp_path, ordinal=5, peak_count=40),
+    ]
+
+    selected = _select_sample_blocks(candidates, 4, strategy="representative")
+
+    assert [candidate.peak_count for candidate in selected][:2] == [300, 250]
+    assert len(selected) == 4
+
+
+def test_first_tuning_sample_preserves_original_prefix(tmp_path: Path) -> None:
+    candidates = [
+        _block_candidate(tmp_path, ordinal=0, peak_count=10),
+        _block_candidate(tmp_path, ordinal=1, peak_count=300),
+        _block_candidate(tmp_path, ordinal=2, peak_count=20),
+    ]
+
+    selected = _select_sample_blocks(candidates, 2, strategy="first")
+
+    assert [candidate.ordinal for candidate in selected] == [0, 1]
+
+
 def _input_dir(tmp_path: Path) -> Path:
     input_dir = tmp_path / "data"
     input_dir.mkdir()
     (input_dir / "a.mgf").write_text(MGF)
     return input_dir
+
+
+def _block_candidate(tmp_path: Path, *, ordinal: int, peak_count: int) -> _BlockCandidate:
+    peak = MGFPeak(moverz=100.0, intensity=10.0)
+    block = MGFSpectrumBlock(
+        index=ordinal + 1,
+        title=str(ordinal + 1),
+        scans=None,
+        precursor_moverz=500.0,
+        charge=2,
+        peaks=tuple(peak for _ in range(peak_count)),
+        header_lines=("BEGIN IONS\n", "PEPMASS=500.0\n", "CHARGE=2+\n"),
+    )
+    return _BlockCandidate(
+        block=block,
+        path=tmp_path / "sample.mgf",
+        ordinal=ordinal,
+        peak_count=peak_count,
+    )
