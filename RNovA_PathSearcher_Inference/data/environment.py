@@ -4,13 +4,14 @@ import numpy as np
 from math import ceil
 
 class Environment(object):
-    def __init__(self, cfg, model, inference_dl, device, logger=None, progress_interval=10):
+    def __init__(self, cfg, model, inference_dl, device, logger=None, progress_interval=10, cache_policy="auto"):
         self.cfg = cfg
         self.model = model
         self.inference_dl_ori = inference_dl
         self.device = device
         self.logger = logger
         self.progress_interval = progress_interval
+        self.cache_policy = cache_policy
         self.generator = torch.Generator('cuda')
         self.generator.manual_seed(0)
         kernel_size = 3
@@ -27,7 +28,7 @@ class Environment(object):
         decoder_steps = 1
         while next_node_mask!=None:
             if self.logger and decoder_steps % self.progress_interval == 0:
-                self.logger.info(
+                self.logger.debug(
                     "PathSearcher decoder step %s: active_spectra=%s, cuda_allocated=%.2f GiB, cuda_reserved=%.2f GiB",
                     decoder_steps,
                     int(self.remain_index.numel()),
@@ -42,13 +43,13 @@ class Environment(object):
         #return nterm_node_seq_list, nterm_score_seq_list, nterm_class_seq_list, cterm_node_seq_list, cterm_score_seq_list, cterm_class_seq_list, title, node_mass_output.cpu().numpy()
         node_seq_list, score_seq_list, class_seq_list = self.result_generation()
         if self.logger:
-            self.logger.info("PathSearcher batch completed after %s decoder step(s)", decoder_steps)
+            self.logger.debug("PathSearcher batch completed after %s decoder step(s)", decoder_steps)
         return node_seq_list, score_seq_list, class_seq_list, title, node_mass_output.cpu().numpy()
 
     def exploration_initializing(self):
         node_input, node_mask, title = next(self.inference_dl)
         if self.logger:
-            self.logger.info(
+            self.logger.debug(
                 "PathSearcher batch received: spectra=%s, padded_nodes=%s, cuda_allocated=%.2f GiB, cuda_reserved=%.2f GiB",
                 node_mask.size(0),
                 node_mask.size(1),
@@ -67,7 +68,7 @@ class Environment(object):
         self.node_index_pos = torch.zeros_like(self.node_index)
         self.iter_num = torch.ones_like(self.node_index)
 
-        max_cache_seq_len = ceil((self.cfg.data.peptide_max_len+20)*self.cfg.data.max_iter*10)
+        max_cache_seq_len = self._max_cache_seq_len()
         self.remain_index = torch.arange(node_mask.size(0),device=self.device).unsqueeze(1)
         self.result_cache = -torch.ones([node_mask.size(0), max_cache_seq_len], dtype=torch.float, device=self.device)
         self.result_score_cache = torch.zeros([node_mask.size(0), max_cache_seq_len], dtype=torch.half, device=self.device)
@@ -94,15 +95,16 @@ class Environment(object):
                 self.decoder_k_cache.numel() * self.decoder_k_cache.element_size()
                 + self.decoder_v_cache.numel() * self.decoder_v_cache.element_size()
             ) / 1024**3
-            self.logger.info(
+            self.logger.debug(
                 "PathSearcher decoder cache allocated: %.2f GiB, max_cache_seq_len=%s",
                 cache_gib,
                 max_cache_seq_len,
             )
-            self.logger.info("PathSearcher encoder forward starting")
+            self.logger.debug("PathSearcher encoder forward starting")
         k_cache, v_cache, node_embedding = self.model.encoder_forward(**node_input)
+        node_embedding_output = self.model.prepare_node_embedding_output(node_embedding)
         if self.logger:
-            self.logger.info("PathSearcher encoder forward finished; initial decoder forward starting")
+            self.logger.debug("PathSearcher encoder forward finished; initial decoder forward starting")
 
         decoder_step_input = {
             'node_index': self.node_index,
@@ -111,6 +113,7 @@ class Environment(object):
             'cache_seqlens': 0,
             # Constant Value for a batch
             'node_embedding': node_embedding,
+            'node_embedding_output': node_embedding_output,
             'k_cache': k_cache,
             'v_cache': v_cache,
             'decoder_k_cache': self.decoder_k_cache,
@@ -118,11 +121,15 @@ class Environment(object):
         }
         node = self.model(**decoder_step_input)
         if self.logger:
-            self.logger.info("PathSearcher initial decoder forward finished")
+            self.logger.debug("PathSearcher initial decoder forward finished")
         next_node_mask = self.step_label_generation(self.node_index)
         return decoder_step_input, node, next_node_mask, title, node_mass_output
 
     def next_aa_choice(self, node, next_node_mask, decoder_step_input):
+        if decoder_step_input['cache_seqlens'] >= self.result_cache.size(1):
+            raise RuntimeError(
+                "PathSearcher decoder cache was exhausted; rerun with --path-cache-policy legacy"
+            )
         node = node.squeeze(1)
         node = node.masked_fill(~next_node_mask, -float('inf'))
         self.node_index = node.argmax(1,keepdim=True)
@@ -149,6 +156,7 @@ class Environment(object):
         self.node_mask = self.node_mask[~finish_explore_flag]
         self.node_last_index = self.node_last_index[~finish_explore_flag]
         decoder_step_input['node_embedding'] = decoder_step_input['node_embedding'][~finish_explore_flag]
+        decoder_step_input['node_embedding_output'] = decoder_step_input['node_embedding_output'][~finish_explore_flag]
         decoder_step_input['k_cache'] = [k[~finish_explore_flag] for k in decoder_step_input['k_cache']]
         decoder_step_input['v_cache'] = [v[~finish_explore_flag] for v in decoder_step_input['v_cache']]
         decoder_step_input['decoder_k_cache'] = decoder_step_input['decoder_k_cache'][~finish_explore_flag]
@@ -173,6 +181,11 @@ class Environment(object):
             #self.result_iter_cache[self.remain_index, decoder_step_input['cache_seqlens']] = self.iter_num
             decoder_step_input['cache_seqlens'] += 1
             return decoder_step_input, next_node_mask
+
+    def _max_cache_seq_len(self):
+        if self.cache_policy == "legacy":
+            return ceil((self.cfg.data.peptide_max_len+20)*self.cfg.data.max_iter*10)
+        return ceil((self.cfg.data.peptide_max_len + 2) * self.cfg.data.max_iter + 8)
 
     def result_generation(self):
         node_seq_list, score_seq_list, class_seq_list = [], [], []

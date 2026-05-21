@@ -1,11 +1,14 @@
 import argparse
 import csv
+import json
 import logging
 import sys
+import time
 import torch
 import numpy as np
 from torch.utils.data import DataLoader
 from pathlib import Path
+from tqdm import tqdm
 
 try:
     from model import RNovA
@@ -43,6 +46,33 @@ def parse_args(argv=None):
         default=1,
         help="DataLoader worker count",
     )
+    parser.add_argument(
+        "--speed-profile",
+        choices=("fast", "exact", "max"),
+        default="fast",
+        help="Runtime speed profile",
+    )
+    parser.add_argument(
+        "--progress",
+        choices=("auto", "on", "off"),
+        default="auto",
+        help="Progress bar behavior",
+    )
+    parser.add_argument(
+        "--log-level",
+        choices=("warning", "info", "debug"),
+        default="warning",
+        help="Log verbosity",
+    )
+    parser.add_argument(
+        "--debug-inference",
+        action="store_true",
+        help="Enable detailed inference diagnostics",
+    )
+    parser.add_argument(
+        "--benchmark-json",
+        help="Internal tuning hook: write elapsed/throughput/peak-memory metrics",
+    )
     parser.add_argument("mgf_files", nargs="+", help="Input .mgf files")
     parser.add_argument("candidate_amino_acids", help="Semicolon-separated candidate amino-acid list")
     return parser.parse_args(argv)
@@ -53,13 +83,14 @@ def read_mgf(mgf_file):
 
 
 def main(argv=None):
+    args = parse_args(argv)
+    log_level = "debug" if args.debug_inference else args.log_level
     logging.basicConfig(
-        level=logging.INFO,
+        level=getattr(logging, log_level.upper()),
         format="%(asctime)s %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
         stream=sys.stdout,
     )
-    args = parse_args(argv)
     if args.batch_size is not None and args.batch_size <= 0:
         raise SystemExit("--batch-size must be greater than 0")
     if args.num_workers < 0:
@@ -67,32 +98,46 @@ def main(argv=None):
     if not torch.cuda.is_available():
         raise SystemExit("CUDA is required for SeqFiller inference, but no CUDA device is visible")
 
+    _apply_speed_profile(args.speed_profile)
+    progress_enabled = _progress_enabled(args.progress)
+    started_at = time.perf_counter()
+    total_spectra = 0
+    output_files = 0
+    torch.cuda.reset_peak_memory_stats(0)
+
     with initialize(config_path="configs", version_base=None): cfg = compose(config_name="config")
     if args.batch_size is not None:
         cfg.train.batch_size = args.batch_size
     local_rank = 0
     torch.cuda.set_device(local_rank)
     device_props = torch.cuda.get_device_properties(local_rank)
-    logger.info(
+    logger.debug(
         "CUDA device %s: %s, %.1f GiB total memory",
         local_rank,
         device_props.name,
         device_props.total_memory / 1024**3,
     )
-    logger.info("SeqFiller runtime: batch_size=%s, num_workers=%s", cfg.train.batch_size, args.num_workers)
-    logger.info("Initializing SeqFiller model")
+    logger.debug("SeqFiller runtime: batch_size=%s, num_workers=%s", cfg.train.batch_size, args.num_workers)
+    logger.debug("Initializing SeqFiller model")
     model = RNovA(cfg).to(local_rank)
     model.eval()
-    logger.info("Loading SeqFiller checkpoint")
+    logger.debug("Loading SeqFiller checkpoint")
     model_checkpoint = torch.load('save/rnova.pt',map_location={'cuda:0': f'cuda:{local_rank}'},weights_only=True)
     model.load_state_dict(model_checkpoint)
-    logger.info("SeqFiller checkpoint loaded")
+    logger.debug("SeqFiller checkpoint loaded")
+    if args.speed_profile == "max":
+        try:
+            model = torch.compile(model, mode="reduce-overhead")
+        except Exception:
+            logger.warning("torch.compile failed; continuing without it", exc_info=args.debug_inference)
 
     candidate_amino_acids = args.candidate_amino_acids.split(';')
-    for mgf_file in args.mgf_files:
+    file_iter = tqdm(args.mgf_files, desc="SeqFiller files", unit="file", disable=not progress_enabled)
+    for mgf_file in file_iter:
         logger.info("Start analysing %s", mgf_file)
-        logger.info("Parsing MGF %s", mgf_file)
+        logger.debug("Parsing MGF %s", mgf_file)
         spectra = read_mgf(mgf_file)
+        total_spectra += len(spectra)
         logger.info("Parsed %s spectra from %s", len(spectra), mgf_file)
 
         ds = RnovaDataset(cfg,spectra)
@@ -112,9 +157,16 @@ def main(argv=None):
         with open(mgf_file[:-4]+'_rnova_denovo_seq.csv', 'w', newline='') as fw:
             writer = csv.writer(fw)
             writer.writerow(['title', 'sequence', 'score'])
-            with torch.no_grad():
-                for batch_index, (results, results_score, titles) in enumerate(environment, start=1):
-                    logger.info("Writing SeqFiller batch %s/%s", batch_index, batch_count)
+            batch_iter = tqdm(
+                environment,
+                total=batch_count,
+                desc=f"SeqFiller {Path(mgf_file).name}",
+                unit="batch",
+                leave=False,
+                disable=not progress_enabled,
+            )
+            with torch.inference_mode():
+                for results, results_score, titles in batch_iter:
                     for result, result_score, title in zip(results, results_score, titles):
                         result_str = []
                         for aa in result:
@@ -126,7 +178,43 @@ def main(argv=None):
                         result_str = ''.join(result_str)
                         result_score = ';'.join(f"{s:.4f}" for s in result_score)
                         writer.writerow([title, result_str, result_score])
+        output_files += 1
         logger.info("Results saved to %s_rnova_denovo_seq.csv", mgf_file[:-4])
+
+    elapsed = time.perf_counter() - started_at
+    metrics = {
+        "stage": "seqfiller",
+        "elapsed_seconds": elapsed,
+        "spectra": total_spectra,
+        "spectra_per_second": total_spectra / elapsed if elapsed > 0 else 0.0,
+        "peak_memory_gib": torch.cuda.max_memory_allocated(0) / 1024**3,
+        "batch_size": cfg.train.batch_size,
+        "num_workers": args.num_workers,
+        "speed_profile": args.speed_profile,
+    }
+    if args.benchmark_json:
+        Path(args.benchmark_json).write_text(json.dumps(metrics, indent=2, sort_keys=True) + "\n")
+    else:
+        print(f"SeqFiller wrote {output_files} file(s) for {total_spectra} spectra.")
+
+
+def _progress_enabled(progress: str) -> bool:
+    if progress == "on":
+        return True
+    if progress == "off":
+        return False
+    return sys.stderr.isatty()
+
+
+def _apply_speed_profile(profile: str) -> None:
+    if profile == "exact":
+        torch.set_float32_matmul_precision("highest")
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
+        return
+    torch.set_float32_matmul_precision("high")
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
 
 if __name__ == "__main__":
     main()

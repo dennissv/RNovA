@@ -4,7 +4,6 @@ from .encoderlayer import EncoderLayer
 from .decoderlayer import DecoderLayer
 from .node_embedding import NodeEmbedding
 from .path_embedding import PathEmbedding
-from math import ceil
 
 class Decoder_Cross_Projector(nn.Module):
     def __init__(self, cfg) -> None:
@@ -52,7 +51,13 @@ class RNovA(nn.Module):
 
     @torch.no_grad()
     @torch.autocast('cuda',dtype=torch.float16)
-    def forward(self, node_index, node_index_pos, node_index_iter, node_embedding, cache_seqlens, k_cache, v_cache, decoder_k_cache, decoder_v_cache):
+    def prepare_node_embedding_output(self, node_embedding):
+        node_embedding = self.output_encoder(node_embedding)
+        return node_embedding/torch.linalg.vector_norm(node_embedding,dim=-1,keepdim=True)
+
+    @torch.no_grad()
+    @torch.autocast('cuda',dtype=torch.float16)
+    def forward(self, node_index, node_index_pos, node_index_iter, node_embedding, cache_seqlens, k_cache, v_cache, decoder_k_cache, decoder_v_cache, node_embedding_output=None):
         node_index_seq = node_index.unsqueeze(-1).repeat_interleave(node_embedding.size(-1),dim=-1)
         node = node_embedding.gather(dim=1,index=node_index_seq)
         node_index_pos = self.node_index_pos_embedding_layer(node_index_pos)
@@ -64,7 +69,7 @@ class RNovA(nn.Module):
                                  k_cache[i],v_cache[i],
                                  decoder_k_cache[:,i],decoder_v_cache[:,i])
         node = self.output_decoder(node)
-        node_embedding = self.output_encoder(node_embedding)
-        node_embedding = node_embedding/torch.linalg.vector_norm(node_embedding,dim=-1,keepdim=True)
-        node = node @ node_embedding.transpose(1,2)
+        if node_embedding_output is None:
+            node_embedding_output = self.prepare_node_embedding_output(node_embedding)
+        node = node @ node_embedding_output.transpose(1,2)
         return node

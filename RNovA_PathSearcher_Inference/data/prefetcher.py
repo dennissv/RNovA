@@ -20,16 +20,16 @@ class DataPrefetcher:
 
     def preload(self):
         if self.logger:
-            self.logger.info("Loading next PathSearcher batch onto CUDA")
+            self.logger.debug("Loading next PathSearcher batch onto CUDA")
         try:
             self.batch = next(self.loader_iter)
         except StopIteration:
             if self.logger:
-                self.logger.info("No more PathSearcher batches to load")
+                self.logger.debug("No more PathSearcher batches to load")
             raise
         self.batch = self.to_cuda(self.batch)
         if self.logger:
-            self.logger.info("Next PathSearcher batch is resident on CUDA")
+            self.logger.debug("Next PathSearcher batch is resident on CUDA")
 
     def __iter__(self):
         self.loader_iter = iter(self.loader)

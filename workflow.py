@@ -1,6 +1,9 @@
 import argparse
+import hashlib
+import json
 import logging
 import os
+import pickle
 import sys
 import re
 from glob import glob
@@ -17,7 +20,14 @@ import numba
 
 logger = logging.getLogger(__name__)
 
-def build_cluster(in_csv: pd.DataFrame):
+def build_cluster(
+    in_csv: pd.DataFrame,
+    *,
+    cache_dir: Path | None = None,
+    refresh_cache: bool = False,
+    null_workers: int = 1,
+    show_progress: bool = True,
+):
     temp = in_csv
     nodes_mass = numba.typed.List()
     for s in temp['node_mass']:
@@ -29,14 +39,28 @@ def build_cluster(in_csv: pd.DataFrame):
 
     logger.info("Total peptides: %s", len(nodes_mass))
 
-    # 3) CD-HIT 风格聚类（Numba 内核，无多进程）
-    null_model = build_null_distribution(nodes_mass, score_fn=nw_masstag_numba, min_ngram=6, max_ngram=15, target_per_L=50_000)
+    null_params = {
+        "min_ngram": 6,
+        "max_ngram": 15,
+        "target_per_L": 50_000,
+        "random_state": 42,
+    }
+    null_model = _load_or_build_null_distribution(
+        temp,
+        nodes_mass,
+        null_params=null_params,
+        cache_dir=cache_dir,
+        refresh_cache=refresh_cache,
+        null_workers=null_workers,
+        show_progress=show_progress,
+    )
     clusters, reps = cdhit_style_cluster_numba_masstag(
         nodes_mass,
         null_model,
         p_thresh=1e-4,
         sim_threshold=0.7,
-        L_min_use=8
+        L_min_use=8,
+        show_progress=show_progress,
     )
 
     cluster_sizes = [len(c) for c in clusters]
@@ -57,6 +81,52 @@ def build_cluster(in_csv: pd.DataFrame):
         logger.info("All clusters are singletons.")
 
     return nodes_mass, clusters_filt
+
+
+def _load_or_build_null_distribution(
+    temp: pd.DataFrame,
+    nodes_mass,
+    *,
+    null_params: dict,
+    cache_dir: Path | None,
+    refresh_cache: bool,
+    null_workers: int,
+    show_progress: bool,
+):
+    cache_path = _null_distribution_cache_path(cache_dir, temp, null_params) if cache_dir else None
+    if cache_path is not None and cache_path.exists() and not refresh_cache:
+        logger.info("Loading cached null distribution from %s", cache_path)
+        with cache_path.open("rb") as handle:
+            return pickle.load(handle)
+
+    null_model = build_null_distribution(
+        nodes_mass,
+        score_fn=nw_masstag_numba,
+        min_ngram=null_params["min_ngram"],
+        max_ngram=null_params["max_ngram"],
+        target_per_L=null_params["target_per_L"],
+        random_state=null_params["random_state"],
+        null_workers=null_workers,
+        show_progress=show_progress,
+    )
+    if cache_path is not None:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = cache_path.with_suffix(".tmp")
+        with tmp_path.open("wb") as handle:
+            pickle.dump(null_model, handle, protocol=pickle.HIGHEST_PROTOCOL)
+        tmp_path.replace(cache_path)
+        logger.info("Cached null distribution at %s", cache_path)
+    return null_model
+
+
+def _null_distribution_cache_path(cache_dir: Path | None, temp: pd.DataFrame, null_params: dict) -> Path | None:
+    if cache_dir is None:
+        return None
+    digest = hashlib.sha256(json.dumps(null_params, sort_keys=True).encode())
+    for value in temp["node_mass"].astype(str):
+        digest.update(b"\0")
+        digest.update(value.encode())
+    return cache_dir / f"null_distribution_{digest.hexdigest()[:20]}.pkl"
 
 
 def masstag_to_delta_mass(nodes_mass, clusters_filt, temp):
@@ -206,18 +276,44 @@ def parse_args():
         action="store_true",
         help="Refresh the cached UniMod XML before annotation",
     )
+    parser.add_argument(
+        "--refresh-workflow-cache",
+        action="store_true",
+        help="Rebuild cached workflow null distributions",
+    )
+    parser.add_argument(
+        "--null-workers",
+        type=int,
+        default=1,
+        help="Worker count for null-distribution sampling",
+    )
+    parser.add_argument(
+        "--progress",
+        choices=("auto", "on", "off"),
+        default="auto",
+        help="Progress bar behavior",
+    )
+    parser.add_argument(
+        "--log-level",
+        choices=("warning", "info", "debug"),
+        default="warning",
+        help="Log verbosity",
+    )
     return parser.parse_args()
 
 def main():
+    args = parse_args()
     logging.basicConfig(
-        level=logging.INFO,
+        level=getattr(logging, args.log_level.upper()),
         format="%(asctime)s %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
         stream=sys.stdout,
     )
-    args = parse_args()
     if args.topk_ptm is not None and args.topk_ptm <= 0:
         raise ValueError("--topk-ptm must be greater than 0")
+    if args.null_workers <= 0:
+        raise ValueError("--null-workers must be greater than 0")
+    show_progress = _progress_enabled(args.progress)
 
     temp = []
     input_files = sorted(glob(args.pep_path))
@@ -231,10 +327,15 @@ def main():
 
     pep_dir = Path(args.pep_path).parent
     output_path = str(pep_dir / "filled_peptides.csv")
+    workflow_cache_dir = pep_dir / ".cache" / "rnova"
 
     # build sequence cluster
     nodes_mass, clusters_filt = build_cluster(
-        temp
+        temp,
+        cache_dir=workflow_cache_dir,
+        refresh_cache=args.refresh_workflow_cache,
+        null_workers=args.null_workers,
+        show_progress=show_progress,
     )
 
     # msa on clusters and fill mass tag gaps with delta masses + aa
@@ -267,6 +368,14 @@ def main():
     clustered_topk_ptm = cluster_ptm_pairs(ptm_freq, eps=0.02)
     ptm_freq_clustered = dict(sorted(clustered_topk_ptm.items(), key=lambda kv: kv[1], reverse=True))
     print("topk_ptm_annotation:", ";".join(list(ptm_freq_clustered.keys())[:topk]))
+
+
+def _progress_enabled(progress: str) -> bool:
+    if progress == "on":
+        return True
+    if progress == "off":
+        return False
+    return sys.stderr.isatty()
 
 if __name__ == "__main__":
     try:

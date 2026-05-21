@@ -18,7 +18,13 @@ null_background.py
 """
 
 import numpy as np
+import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, Dict, Any, Tuple, List
+from tqdm import tqdm
+
+
+logger = logging.getLogger(__name__)
 
 # ============================================================
 # 1. 从 nodes_mass 构建经验分布
@@ -49,10 +55,9 @@ def build_ngram_pools(nodes_mass,
                 # 拷贝一份，避免后面 arr 变化影响
                 ngrams_by_len[k].append(gram.copy())
 
-    # 打印一下简单统计
-    print("=== N-gram pools built ===")
+    logger.info("N-gram pools built")
     for k in range(min_ngram, max_ngram + 1):
-        print(f"  k={k}: {len(ngrams_by_len[k])} grams")
+        logger.info("  k=%s: %s grams", k, len(ngrams_by_len[k]))
     return ngrams_by_len
 
 
@@ -239,7 +244,9 @@ def build_null_distribution(
         min_ngram: int = 6,
         max_ngram: int = 15,
         target_per_L: int = 20_000,
-        random_state: int = 42) -> Dict[str, Any]:
+        random_state: int = 42,
+        null_workers: int = 1,
+        show_progress: bool = True) -> Dict[str, Any]:
     """
     使用 n-gram 生成的随机序列 + 真实长度分布 lens，构建 null 分布。
     
@@ -265,7 +272,7 @@ def build_null_distribution(
             - "target_per_L": target_per_L
             - "lens_empirical": 原始长度数组
     """
-    rng = np.random.default_rng(random_state) 
+    rng = np.random.default_rng(random_state)
     # 1) 构建 n-gram 池 & 长度分布
     ngrams_by_len = build_ngram_pools(nodes_mass, min_ngram=min_ngram, max_ngram=max_ngram)
     lens = np.array([len(arr) for arr in nodes_mass], dtype=np.int32)
@@ -275,34 +282,63 @@ def build_null_distribution(
 
     scores_per_L = {L: [] for L in range(L_min, L_max + 1)}
 
-    print(f"[build_null_distribution_ngram] L_eff range = {L_min} ~ {L_max}")
-    print(f"[build_null_distribution_ngram] target_per_L = {target_per_L}")
-    print(f"[build_null_distribution_ngram] max_ngram = {max_ngram}")
-    print(f"[build_null_distribution_ngram] min_ngram = {min_ngram}")
+    logger.info("[build_null_distribution_ngram] L_eff range = %s ~ %s", L_min, L_max)
+    logger.info("[build_null_distribution_ngram] target_per_L = %s", target_per_L)
+    logger.info("[build_null_distribution_ngram] max_ngram = %s", max_ngram)
+    logger.info("[build_null_distribution_ngram] min_ngram = %s", min_ngram)
+    logger.info("[build_null_distribution_ngram] null_workers = %s", null_workers)
 
-    for L_eff in range(L_min, L_max + 1):
-        # 只考虑 len >= L_eff 的长度，用于 len_b 分布
+    def sample_for_L_eff(L_eff: int, local_rng: np.random.Generator) -> tuple[int, list[float]]:
         temp_lens = lens[lens >= L_eff]
         if temp_lens.size == 0:
-            print(f"  WARNING: no sequences with len >= {L_eff}, skip.")
-            continue
-
-        print(f"  Sampling for L_eff = {L_eff} ... ", end="", flush=True)
+            logger.warning("no sequences with len >= %s, skip", L_eff)
+            return L_eff, []
+        scores = []
         for _ in range(target_per_L):
-            # len_a = L_eff（固定）
             len_a = L_eff
-            # len_b 按真实长度分布（条件在 >=L_eff）抽
-            len_b = int(temp_lens[rng.integers(0, temp_lens.size)])
-
-            # 生成 a,b
-            a = sample_seq_from_ngrams(len_a, ngrams_by_len, rng, min_ng=min_ngram, max_ng=max_ngram)
-            b = sample_seq_from_ngrams(len_b, ngrams_by_len, rng, min_ng=min_ngram, max_ng=max_ngram)
-
-            # score(a,b)
+            len_b = int(temp_lens[local_rng.integers(0, temp_lens.size)])
+            a = sample_seq_from_ngrams(len_a, ngrams_by_len, local_rng, min_ng=min_ngram, max_ng=max_ngram)
+            b = sample_seq_from_ngrams(len_b, ngrams_by_len, local_rng, min_ng=min_ngram, max_ng=max_ngram)
             s, _ = score_fn(a, b)
-            scores_per_L[L_eff].append(float(s))
+            scores.append(float(s))
+        return L_eff, scores
 
-        print(f"done, collected {len(scores_per_L[L_eff])} scores.")
+    L_values = list(range(L_min, L_max + 1))
+    if null_workers <= 1:
+        iterator = tqdm(
+            L_values,
+            desc="Null distribution",
+            unit="L",
+            disable=not show_progress,
+        )
+        for L_eff in iterator:
+            L_eff, scores = sample_for_L_eff(L_eff, rng)
+            scores_per_L[L_eff] = scores
+    else:
+        try:
+            warm = np.ones(min_ngram, dtype=np.float32)
+            score_fn(warm, warm)
+        except Exception:
+            logger.debug("score function warmup failed", exc_info=True)
+        with ThreadPoolExecutor(max_workers=null_workers) as executor:
+            futures = {
+                executor.submit(
+                    sample_for_L_eff,
+                    L_eff,
+                    np.random.default_rng(random_state + L_eff * 1009),
+                ): L_eff
+                for L_eff in L_values
+            }
+            iterator = tqdm(
+                as_completed(futures),
+                total=len(futures),
+                desc="Null distribution",
+                unit="L",
+                disable=not show_progress,
+            )
+            for future in iterator:
+                L_eff, scores = future.result()
+                scores_per_L[L_eff] = scores
 
     # 2) 整理结果
     scores_per_L_sorted = {}
@@ -329,7 +365,7 @@ def build_null_distribution(
         "min_ngram": min_ngram,
     }
 
-    print("[build_null_distribution_ngram] Done.")
+    logger.info("[build_null_distribution_ngram] Done.")
     return null_model
 
 # ============================================================
@@ -464,4 +500,3 @@ if __name__ == "__main__":
     print(f"Example: score={score_obs}, len_a={len_a}, len_b={len_b}")
     print(f"  p-value ≈ {p:.3e}")
     print(f"  Z-score ≈ {z:.3f}")
-

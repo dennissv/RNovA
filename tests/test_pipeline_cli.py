@@ -67,6 +67,9 @@ def test_build_commands_can_override_inference_batch_sizes(tmp_path) -> None:
         "2",
     ]
     assert commands[4].args[2:6] == ["--batch-size", "4", "--num-workers", "0"]
+    assert "--speed-profile" in commands[1].args
+    assert "--path-cache-policy" in commands[1].args
+    assert "--log-level" in commands[4].args
 
 
 def test_cli_dry_run_prints_planned_commands(tmp_path) -> None:
@@ -169,6 +172,74 @@ def test_cli_dry_run_prints_batch_overrides(tmp_path) -> None:
     assert completed.returncode == 0, completed.stderr
     assert "Inference_Node.py --batch-size 8 --num-workers 0 --progress-interval 2" in completed.stdout
     assert "Inference_Sequence.py --batch-size 4 --num-workers 0" in completed.stdout
+
+
+def test_cli_dry_run_prints_speed_defaults(tmp_path) -> None:
+    root = Path(__file__).resolve().parents[1]
+    input_dir = tmp_path / "data"
+    input_dir.mkdir()
+    (input_dir / "a.mgf").write_text(MGF)
+    env = os.environ.copy()
+    env["PYTHONPATH"] = f"{root / 'src'}{os.pathsep}{root}{os.pathsep}{env.get('PYTHONPATH', '')}"
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "rnova.cli",
+            "run",
+            str(input_dir),
+            "--dry-run",
+        ],
+        cwd=root,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "Speed profile: fast" in completed.stdout
+    assert "Progress: auto" in completed.stdout
+    assert "Log level: warning" in completed.stdout
+    assert "--speed-profile fast --progress auto --log-level warning" in completed.stdout
+
+
+def test_cli_dry_run_accepts_debug_and_cache_policy(tmp_path) -> None:
+    root = Path(__file__).resolve().parents[1]
+    input_dir = tmp_path / "data"
+    input_dir.mkdir()
+    (input_dir / "a.mgf").write_text(MGF)
+    env = os.environ.copy()
+    env["PYTHONPATH"] = f"{root / 'src'}{os.pathsep}{root}{os.pathsep}{env.get('PYTHONPATH', '')}"
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "rnova.cli",
+            "run",
+            str(input_dir),
+            "--dry-run",
+            "--debug-inference",
+            "--path-cache-policy",
+            "legacy",
+            "--progress",
+            "off",
+            "--log-level",
+            "debug",
+        ],
+        cwd=root,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "PathSearcher cache policy: legacy" in completed.stdout
+    assert "--path-cache-policy legacy --debug-inference" in completed.stdout
+    assert "--progress off --log-level debug" in completed.stdout
 
 
 def test_find_mgf_files_and_missing_extension_validation(tmp_path) -> None:

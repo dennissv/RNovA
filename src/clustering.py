@@ -19,7 +19,7 @@ GAP_OPEN = -4
 GAP_EXTEND = -1
 
 
-@njit(fastmath=True)
+@njit(fastmath=True, cache=True)
 def nw_masstag_numba(mass_seq_a, mass_seq_b, mass_threshold=0.02, max_block_mass=600.0):
     """
     mass_seq_a, mass_seq_b: 1D float32/float64 array
@@ -146,7 +146,7 @@ def nw_masstag_numba(mass_seq_a, mass_seq_b, mass_threshold=0.02, max_block_mass
     return int(best), int(best_match)
 
 
-@njit
+@njit(cache=True)
 def similarity_masstag(mass_seq_a, mass_seq_b, best_match):
     """
     相似度定义：block 数 / min(len(a), len(b))
@@ -164,7 +164,7 @@ def similarity_masstag(mass_seq_a, mass_seq_b, best_match):
 # --------------------------------------------------------
 
 
-@njit(parallel=True)
+@njit(parallel=True, cache=True)
 def best_rep_for_seq_masstag(
     seq_idx,
     reps_idx,  # 1D int32 数组，存代表的全局 index
@@ -193,7 +193,7 @@ def best_rep_for_seq_masstag(
     return sims, scores
 
 
-@njit
+@njit(cache=True)
 def choose_cluster_for_seq(
     len_idx: int,
     reps_idx_np,  # 1D int32，全局 index
@@ -242,7 +242,7 @@ def choose_cluster_for_seq(
     return -1
 
 
-@njit
+@njit(cache=True)
 def p_value_for_score_numba(
     score_obs: float,
     len_a: int,
@@ -343,6 +343,7 @@ def cdhit_style_cluster_numba_masstag(
     sim_threshold=0.6,
     L_min_use=5,
     mass_threshold=0.02,
+    show_progress=True,
 ):
 
     n = len(nodes_mass)
@@ -367,7 +368,12 @@ def cdhit_style_cluster_numba_masstag(
         dummy_reps = np.array([0], dtype=np.int32)
         _ = best_rep_for_seq_masstag(0, dummy_reps, nodes_mass, mass_threshold)
 
-    for idx in tqdm(order, total=n, desc="CD-HIT style clustering (p-value, mass-tag)"):
+    for idx in tqdm(
+        order,
+        total=n,
+        desc="CD-HIT style clustering (p-value, mass-tag)",
+        disable=not show_progress,
+    ):
         len_idx = len(nodes_mass[idx])
         if len_idx < L_min_use:
             continue

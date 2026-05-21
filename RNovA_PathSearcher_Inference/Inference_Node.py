@@ -1,11 +1,14 @@
 import argparse
 import csv
+import json
 import logging
 import sys
+import time
 import torch
 import numpy as np
 from torch.utils.data import DataLoader
 from pathlib import Path
+from tqdm import tqdm
 
 try:
     from model import RNovA
@@ -50,6 +53,39 @@ def parse_args(argv=None):
         default=10,
         help="Log decoder progress every N steps inside a batch",
     )
+    parser.add_argument(
+        "--speed-profile",
+        choices=("fast", "exact", "max"),
+        default="fast",
+        help="Runtime speed profile",
+    )
+    parser.add_argument(
+        "--progress",
+        choices=("auto", "on", "off"),
+        default="auto",
+        help="Progress bar behavior",
+    )
+    parser.add_argument(
+        "--log-level",
+        choices=("warning", "info", "debug"),
+        default="warning",
+        help="Log verbosity",
+    )
+    parser.add_argument(
+        "--debug-inference",
+        action="store_true",
+        help="Enable detailed encoder/decoder/cache diagnostics",
+    )
+    parser.add_argument(
+        "--path-cache-policy",
+        choices=("auto", "legacy"),
+        default="auto",
+        help="Decoder cache allocation policy",
+    )
+    parser.add_argument(
+        "--benchmark-json",
+        help="Internal tuning hook: write elapsed/throughput/peak-memory metrics",
+    )
     return parser.parse_args(argv)
 
 
@@ -58,13 +94,14 @@ def read_mgf(mgf_file):
 
 
 def main(argv=None):
+    args = parse_args(argv)
+    log_level = "debug" if args.debug_inference else args.log_level
     logging.basicConfig(
-        level=logging.INFO,
+        level=getattr(logging, log_level.upper()),
         format="%(asctime)s %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
         stream=sys.stdout,
     )
-    args = parse_args(argv)
     if args.batch_size is not None and args.batch_size <= 0:
         raise SystemExit("--batch-size must be greater than 0")
     if args.num_workers < 0:
@@ -74,37 +111,51 @@ def main(argv=None):
     if not torch.cuda.is_available():
         raise SystemExit("CUDA is required for PathSearcher inference, but no CUDA device is visible")
 
+    _apply_speed_profile(args.speed_profile)
+    progress_enabled = _progress_enabled(args.progress)
+    started_at = time.perf_counter()
+    total_spectra = 0
+    output_files = 0
+    torch.cuda.reset_peak_memory_stats(0)
+
     with initialize(config_path="configs", version_base=None): cfg = compose(config_name="config")
     if args.batch_size is not None:
         cfg.train.batch_size = args.batch_size
     local_rank = 0
     torch.cuda.set_device(local_rank)
     device_props = torch.cuda.get_device_properties(local_rank)
-    logger.info(
+    logger.debug(
         "CUDA device %s: %s, %.1f GiB total memory",
         local_rank,
         device_props.name,
         device_props.total_memory / 1024**3,
     )
-    logger.info(
+    logger.debug(
         "PathSearcher runtime: batch_size=%s, num_workers=%s, progress_interval=%s",
         cfg.train.batch_size,
         args.num_workers,
         args.progress_interval,
     )
-    logger.info("Initializing PathSearcher model")
+    logger.debug("Initializing PathSearcher model")
     model = RNovA(cfg).to(local_rank)
     model.eval()
-    logger.info("Loading PathSearcher checkpoint")
+    logger.debug("Loading PathSearcher checkpoint")
     model.load_state_dict(torch.load('save/rnova.pt',map_location={'cuda:0': f'cuda:{local_rank}'},weights_only=True))
-    logger.info("PathSearcher checkpoint loaded")
+    logger.debug("PathSearcher checkpoint loaded")
+    if args.speed_profile == "max":
+        try:
+            model = torch.compile(model, mode="reduce-overhead")
+        except Exception:
+            logger.warning("torch.compile failed; continuing without it", exc_info=args.debug_inference)
 
-    for mgf_file in args.mgf_files:
+    file_iter = tqdm(args.mgf_files, desc="PathSearcher files", unit="file", disable=not progress_enabled)
+    for mgf_file in file_iter:
         logger.info("Start analysing %s", mgf_file)
         write_file_name = mgf_file[:-4]+'_rnova_denovo_path.csv'
 
-        logger.info("Parsing MGF %s", mgf_file)
+        logger.debug("Parsing MGF %s", mgf_file)
         spectra = read_mgf(mgf_file)
+        total_spectra += len(spectra)
         logger.info("Parsed %s spectra from %s", len(spectra), mgf_file)
         ds = RnovaDataset(cfg,spectra)
         collator = RnovaCollator(cfg)
@@ -117,27 +168,73 @@ def main(argv=None):
         )
         batch_count = len(inference_dl)
         logger.info("Prepared %s PathSearcher batch(es)", batch_count)
-        inference_dl = DataPrefetcher(inference_dl,local_rank,logger=logger)
+        debug_logger = logger if args.debug_inference else None
+        inference_dl = DataPrefetcher(inference_dl,local_rank,logger=debug_logger)
         inference_dl = Environment(
             cfg,
             model,
             inference_dl,
             local_rank,
-            logger=logger,
+            logger=debug_logger,
             progress_interval=args.progress_interval,
+            cache_policy=args.path_cache_policy,
         )
         with open(write_file_name, 'w', newline='') as fw:
             writer = csv.writer(fw)
             writer.writerow(['scan', 'node_mass', 'score', 'node_class'])
-            with torch.no_grad():
-                for batch_index, (node_seq, score_seq, class_seq, title, _) in enumerate(inference_dl, start=1):
-                    logger.info("Writing PathSearcher batch %s/%s", batch_index, batch_count)
+            batch_iter = tqdm(
+                inference_dl,
+                total=batch_count,
+                desc=f"PathSearcher {Path(mgf_file).name}",
+                unit="batch",
+                leave=False,
+                disable=not progress_enabled,
+            )
+            with torch.inference_mode():
+                for node_seq, score_seq, class_seq, title, _ in batch_iter:
                     for node, s, c, t in zip(node_seq, score_seq, class_seq, title):
                         path = np.array2string(node,separator=';',formatter={'float_kind': lambda x: f"{x:.4f}"},max_line_width=999999).strip('[]')
                         path_score = np.array2string(s,separator=';',formatter={'float_kind': lambda x: f"{x:.4f}"},max_line_width=999999).strip('[]')
                         class_list = np.array2string(c,separator=';',max_line_width=999999).strip('[]')
                         writer.writerow([t, path, path_score, class_list])
+        output_files += 1
         logger.info("Results saved to %s_rnova_denovo_path.csv", mgf_file[:-4])
+
+    elapsed = time.perf_counter() - started_at
+    metrics = {
+        "stage": "pathsearcher",
+        "elapsed_seconds": elapsed,
+        "spectra": total_spectra,
+        "spectra_per_second": total_spectra / elapsed if elapsed > 0 else 0.0,
+        "peak_memory_gib": torch.cuda.max_memory_allocated(0) / 1024**3,
+        "batch_size": cfg.train.batch_size,
+        "num_workers": args.num_workers,
+        "speed_profile": args.speed_profile,
+        "path_cache_policy": args.path_cache_policy,
+    }
+    if args.benchmark_json:
+        Path(args.benchmark_json).write_text(json.dumps(metrics, indent=2, sort_keys=True) + "\n")
+    else:
+        print(f"PathSearcher wrote {output_files} file(s) for {total_spectra} spectra.")
+
+
+def _progress_enabled(progress: str) -> bool:
+    if progress == "on":
+        return True
+    if progress == "off":
+        return False
+    return sys.stderr.isatty()
+
+
+def _apply_speed_profile(profile: str) -> None:
+    if profile == "exact":
+        torch.set_float32_matmul_precision("highest")
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
+        return
+    torch.set_float32_matmul_precision("high")
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
 
 if __name__ == "__main__":
     main()

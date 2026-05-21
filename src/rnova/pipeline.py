@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .errors import RNovAError
+from .speed import RuntimeSettings, resolve_runtime_settings
+from .tuning import run_tuning
 from .validation import (
     PATHSEARCHER_CHECKPOINT,
     PATHSEARCHER_DIR,
@@ -51,6 +53,13 @@ def build_commands(
     seq_batch_size: int | None = None,
     seq_num_workers: int | None = None,
     progress_interval: int | None = None,
+    speed_profile: str = "fast",
+    progress: str = "auto",
+    log_level: str = "warning",
+    debug_inference: bool = False,
+    path_cache_policy: str = "auto",
+    null_workers: int = 1,
+    refresh_workflow_cache: bool = False,
     topk_annotation: str = "<topk_ptm_annotation from workflow>",
 ) -> list[PlannedCommand]:
     input_path = Path(input_dir).expanduser().resolve()
@@ -63,6 +72,10 @@ def build_commands(
     if refresh_unimod:
         workflow_args.append("--refresh-unimod")
     workflow_args.extend(["--topk-ptm", str(top_k_ptms)])
+    workflow_args.extend(["--progress", progress, "--log-level", log_level])
+    workflow_args.extend(["--null-workers", str(null_workers)])
+    if refresh_workflow_cache:
+        workflow_args.append("--refresh-workflow-cache")
 
     candidate_amino_acids = BASE_CANDIDATE_AMINO_ACIDS
     if topk_annotation:
@@ -75,6 +88,11 @@ def build_commands(
         pathsearcher_args.extend(["--num-workers", str(path_num_workers)])
     if progress_interval is not None:
         pathsearcher_args.extend(["--progress-interval", str(progress_interval)])
+    pathsearcher_args.extend(["--speed-profile", speed_profile])
+    pathsearcher_args.extend(["--progress", progress, "--log-level", log_level])
+    pathsearcher_args.extend(["--path-cache-policy", path_cache_policy])
+    if debug_inference:
+        pathsearcher_args.append("--debug-inference")
     pathsearcher_args.extend([*map(str, mgf_files), *map(str, decoy_mgfs)])
 
     seqfiller_args = [sys.executable, "Inference_Sequence.py"]
@@ -82,6 +100,10 @@ def build_commands(
         seqfiller_args.extend(["--batch-size", str(seq_batch_size)])
     if seq_num_workers is not None:
         seqfiller_args.extend(["--num-workers", str(seq_num_workers)])
+    seqfiller_args.extend(["--speed-profile", speed_profile])
+    seqfiller_args.extend(["--progress", progress, "--log-level", log_level])
+    if debug_inference:
+        seqfiller_args.append("--debug-inference")
     seqfiller_args.extend([*map(str, mgf_files), *map(str, decoy_mgfs), candidate_amino_acids])
 
     return [
@@ -124,23 +146,40 @@ def run_pipeline(
     use_unimod: bool,
     top_k_ptms: int,
     refresh_unimod: bool = False,
-    path_batch_size: int | None = None,
-    path_num_workers: int | None = None,
-    seq_batch_size: int | None = None,
-    seq_num_workers: int | None = None,
+    path_batch_size: str | int | None = "auto",
+    path_num_workers: str | int | None = "auto",
+    seq_batch_size: str | int | None = "auto",
+    seq_num_workers: str | int | None = "auto",
     progress_interval: int | None = None,
+    speed_profile: str = "fast",
+    progress: str = "auto",
+    log_level: str = "warning",
+    debug_inference: bool = False,
+    retune: bool = False,
+    path_cache_policy: str = "auto",
+    null_workers: str | int | None = "auto",
+    refresh_workflow_cache: bool = False,
     dry_run: bool = False,
 ) -> None:
     input_path = Path(input_dir).expanduser().resolve()
     if top_k_ptms <= 0:
         raise RNovAError("--top-k-ptms must be greater than 0")
-    _validate_positive_optional("--path-batch-size", path_batch_size)
-    _validate_nonnegative_optional("--path-num-workers", path_num_workers)
-    _validate_positive_optional("--seq-batch-size", seq_batch_size)
-    _validate_nonnegative_optional("--seq-num-workers", seq_num_workers)
     _validate_positive_optional("--progress-interval", progress_interval)
     mgf_files = _validate_input(input_path)
     _validate_vendor_files()
+    settings = _resolve_settings(
+        input_path,
+        speed_profile=speed_profile,
+        progress=progress,
+        log_level=log_level,
+        path_cache_policy=path_cache_policy,
+        path_batch_size=path_batch_size,
+        path_num_workers=path_num_workers,
+        seq_batch_size=seq_batch_size,
+        seq_num_workers=seq_num_workers,
+        null_workers=null_workers,
+        use_tuning=not retune,
+    )
 
     if dry_run:
         assert_checks_pass(collect_checks(input_path, mode="dry-run"))
@@ -149,13 +188,35 @@ def run_pipeline(
             use_unimod=use_unimod,
             refresh_unimod=refresh_unimod,
             top_k_ptms=top_k_ptms,
+            settings=settings,
+            progress_interval=progress_interval,
+            debug_inference=debug_inference,
+            refresh_workflow_cache=refresh_workflow_cache,
+        )
+        return
+
+    if retune:
+        tuning_path = run_tuning(
+            input_path,
+            speed_profile=speed_profile,
+            path_cache_policy=path_cache_policy,
+            progress=progress,
+            log_level=log_level,
+        )
+        print(f"Tuning saved: {tuning_path}")
+        settings = _resolve_settings(
+            input_path,
+            speed_profile=speed_profile,
+            progress=progress,
+            log_level=log_level,
+            path_cache_policy=path_cache_policy,
             path_batch_size=path_batch_size,
             path_num_workers=path_num_workers,
             seq_batch_size=seq_batch_size,
             seq_num_workers=seq_num_workers,
-            progress_interval=progress_interval,
+            null_workers=null_workers,
+            use_tuning=True,
         )
-        return
 
     _validate_runtime(input_path)
 
@@ -164,22 +225,31 @@ def run_pipeline(
         use_unimod=use_unimod,
         refresh_unimod=refresh_unimod,
         top_k_ptms=top_k_ptms,
-        path_batch_size=path_batch_size,
-        path_num_workers=path_num_workers,
-        seq_batch_size=seq_batch_size,
-        seq_num_workers=seq_num_workers,
+        path_batch_size=settings.path_batch_size,
+        path_num_workers=settings.path_num_workers,
+        seq_batch_size=settings.seq_batch_size,
+        seq_num_workers=settings.seq_num_workers,
         progress_interval=progress_interval,
+        speed_profile=settings.speed_profile,
+        progress=settings.progress,
+        log_level=settings.log_level,
+        debug_inference=debug_inference,
+        path_cache_policy=settings.path_cache_policy,
+        null_workers=settings.null_workers,
+        refresh_workflow_cache=refresh_workflow_cache,
     )
 
-    _run(commands[0])
+    show_command = settings.log_level == "debug"
+
+    _run(commands[0], show_command=show_command)
     decoy_mgfs = [expected_decoy_path(mgf, input_path / "decoy_mgf") for mgf in mgf_files]
     _require_files("decoy generation", decoy_mgfs)
 
-    _run(commands[1])
+    _run(commands[1], show_command=show_command)
     _validate_pathsearcher_outputs(mgf_files, decoy_mgfs)
-    _run(commands[2])
+    _run(commands[2], show_command=show_command)
     _validate_fdr_stage1_outputs(mgf_files)
-    workflow_output = _run(commands[3], capture_stdout=True)
+    workflow_output = _run(commands[3], capture_stdout=True, show_command=show_command, echo_stdout=show_command)
     _validate_workflow_outputs(input_path)
     topk_annotation = _parse_topk_annotation(workflow_output)
     seq_command = build_commands(
@@ -187,17 +257,25 @@ def run_pipeline(
         use_unimod=use_unimod,
         refresh_unimod=refresh_unimod,
         top_k_ptms=top_k_ptms,
-        path_batch_size=path_batch_size,
-        path_num_workers=path_num_workers,
-        seq_batch_size=seq_batch_size,
-        seq_num_workers=seq_num_workers,
+        path_batch_size=settings.path_batch_size,
+        path_num_workers=settings.path_num_workers,
+        seq_batch_size=settings.seq_batch_size,
+        seq_num_workers=settings.seq_num_workers,
         progress_interval=progress_interval,
+        speed_profile=settings.speed_profile,
+        progress=settings.progress,
+        log_level=settings.log_level,
+        debug_inference=debug_inference,
+        path_cache_policy=settings.path_cache_policy,
+        null_workers=settings.null_workers,
+        refresh_workflow_cache=refresh_workflow_cache,
         topk_annotation=topk_annotation,
     )[4]
-    _run(seq_command)
+    _run(seq_command, show_command=show_command)
     _validate_seqfiller_outputs(mgf_files, decoy_mgfs)
-    _run(commands[5])
+    _run(commands[5], show_command=show_command)
     _validate_fdr_stage2_outputs(mgf_files)
+    print(f"RNovA workflow finished for {len(mgf_files)} input MGF file(s).")
 
 
 def setup_seqfiller_extension() -> None:
@@ -228,9 +306,11 @@ def _validate_positive_optional(name: str, value: int | None) -> None:
         raise RNovAError(f"{name} must be greater than 0")
 
 
-def _validate_nonnegative_optional(name: str, value: int | None) -> None:
-    if value is not None and value < 0:
-        raise RNovAError(f"{name} must be greater than or equal to 0")
+def _resolve_settings(input_path: Path, **kwargs) -> RuntimeSettings:
+    try:
+        return resolve_runtime_settings(input_path, **kwargs)
+    except ValueError as exc:
+        raise RNovAError(str(exc)) from exc
 
 
 def _validate_vendor_files() -> None:
@@ -356,48 +436,67 @@ def _print_dry_run(
     use_unimod: bool,
     refresh_unimod: bool,
     top_k_ptms: int,
-    path_batch_size: int | None,
-    path_num_workers: int | None,
-    seq_batch_size: int | None,
-    seq_num_workers: int | None,
+    settings: RuntimeSettings,
     progress_interval: int | None,
+    debug_inference: bool,
+    refresh_workflow_cache: bool,
 ) -> None:
     print(f"Input directory: {input_path}")
     print(f"Input MGF files found: {len(find_mgf_files(input_path))}")
     print(f"Decoy output directory: {input_path / 'decoy_mgf'}")
     print(f"PathSearcher checkpoint: {PATHSEARCHER_CHECKPOINT}")
     print(f"SeqFiller checkpoint: {SEQFILLER_CHECKPOINT}")
+    print(f"Speed profile: {settings.speed_profile}")
+    print(f"Progress: {settings.progress}")
+    print(f"Log level: {settings.log_level}")
+    print(f"Runtime settings source: {settings.source}")
+    print(f"PathSearcher batch/workers: {settings.path_batch_size}/{settings.path_num_workers}")
+    print(f"SeqFiller batch/workers: {settings.seq_batch_size}/{settings.seq_num_workers}")
+    print(f"PathSearcher cache policy: {settings.path_cache_policy}")
+    print(f"Workflow null workers: {settings.null_workers}")
     print()
     for command in build_commands(
         input_path,
         use_unimod=use_unimod,
         refresh_unimod=refresh_unimod,
         top_k_ptms=top_k_ptms,
-        path_batch_size=path_batch_size,
-        path_num_workers=path_num_workers,
-        seq_batch_size=seq_batch_size,
-        seq_num_workers=seq_num_workers,
+        path_batch_size=settings.path_batch_size,
+        path_num_workers=settings.path_num_workers,
+        seq_batch_size=settings.seq_batch_size,
+        seq_num_workers=settings.seq_num_workers,
         progress_interval=progress_interval,
+        speed_profile=settings.speed_profile,
+        progress=settings.progress,
+        log_level=settings.log_level,
+        debug_inference=debug_inference,
+        path_cache_policy=settings.path_cache_policy,
+        null_workers=settings.null_workers,
+        refresh_workflow_cache=refresh_workflow_cache,
     ):
         print(f"{command.step}:")
         print(f"  {command.display()}")
 
 
-def _run(command: PlannedCommand, *, capture_stdout: bool = False) -> str:
+def _run(
+    command: PlannedCommand,
+    *,
+    capture_stdout: bool = False,
+    show_command: bool = False,
+    echo_stdout: bool = True,
+) -> str:
     print(f"{command.step}:")
-    print(f"$ {command.display()}")
+    if show_command:
+        print(f"$ {command.display()}")
     if capture_stdout:
         completed = subprocess.run(
             command.args,
             cwd=command.cwd,
             text=True,
-            capture_output=True,
+            stdout=subprocess.PIPE,
             check=False,
         )
-        if completed.stdout:
+        if echo_stdout and completed.stdout:
             print(completed.stdout, end="")
-        if completed.stderr:
-            print(completed.stderr, end="", file=sys.stderr)
     else:
         completed = subprocess.run(command.args, cwd=command.cwd, check=False)
 

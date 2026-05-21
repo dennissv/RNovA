@@ -27,6 +27,8 @@ uv run rnova doctor --mode inference ./data
 uv run rnova run ./data --use-unimod --top-k-ptms 10
 ```
 
+`rnova run` now defaults to the fast desktop-GPU profile, quiet logs, automatic batch sizes, and progress bars when running interactively.
+
 The legacy shell entry point still works as a wrapper around the CLI:
 
 ```bash
@@ -77,13 +79,25 @@ uv run rnova setup
 uv run rnova doctor --mode inference /path/to/mgf-data
 ```
 
-5. Run the workflow:
+5. Optionally tune the GPU settings on the workstation:
+
+```bash
+uv run rnova tune /path/to/mgf-data --sample-spectra 64 --max-memory-frac 0.85
+```
+
+The tuning result is cached in `.cache/rnova/tuning.json`. Future `rnova run`
+commands use it unless you pass explicit batch/worker options. Use `--retune`
+on `rnova run` to refresh the cache before starting a real workflow run.
+
+6. Run the workflow:
 
 ```bash
 uv run rnova run /path/to/mgf-data --use-unimod --top-k-ptms 10
 ```
 
-For 12 GiB cards such as a 4070 Ti, start with smaller inference batches:
+For 12 GiB cards such as a 4070 Ti, the default automatic settings start at
+PathSearcher batch 8, SeqFiller batch 8, and WSL worker count 0. You can still
+pin the values manually:
 
 ```bash
 uv run rnova run /path/to/mgf-data \
@@ -92,8 +106,7 @@ uv run rnova run /path/to/mgf-data \
   --path-batch-size 8 \
   --seq-batch-size 8 \
   --path-num-workers 0 \
-  --seq-num-workers 0 \
-  --progress-interval 2
+  --seq-num-workers 0
 ```
 
 ## Commands
@@ -163,7 +176,7 @@ Generated native files such as `knapsack_build.c` and `knapsack_build*.so` are i
 uv run rnova run ./data --use-unimod --top-k-ptms 10 --dry-run
 ```
 
-Prints the exact six-stage workflow commands without running inference.
+Prints the resolved runtime settings and exact six-stage workflow commands without running inference.
 
 ### Run Workflow
 
@@ -175,10 +188,40 @@ Use `--refresh-unimod` with `--use-unimod` to refresh the cached UniMod XML befo
 
 Useful GPU/runtime controls:
 
-- `--path-batch-size N`: lower PathSearcher batch size when GPU memory is tight.
-- `--seq-batch-size N`: lower SeqFiller batch size when GPU memory is tight.
-- `--path-num-workers N` and `--seq-num-workers N`: set DataLoader workers; `0` is easier to debug under WSL.
-- `--progress-interval N`: log PathSearcher decoder progress every N decoder steps inside a batch.
+- `--speed-profile fast|exact|max`: `fast` is the default; `exact` disables TF32; `max` also tries `torch.compile`.
+- `--progress auto|on|off`: controls progress bars; `auto` shows them only on interactive terminals.
+- `--log-level warning|info|debug`: quiet by default.
+- `--debug-inference`: enables detailed encoder/decoder/cache diagnostics.
+- `--path-batch-size auto|N` and `--seq-batch-size auto|N`: automatic or manual inference batches.
+- `--path-num-workers auto|N` and `--seq-num-workers auto|N`: automatic or manual DataLoader workers.
+- `--path-cache-policy auto|legacy`: `auto` uses a smaller bounded decoder cache; `legacy` restores the old oversized allocation.
+- `--null-workers auto|N`: controls workflow null-distribution sampling workers.
+- `--refresh-workflow-cache`: rebuilds cached workflow null distributions.
+- `--retune`: tune GPU settings before running.
+
+Automatic batch sizes are based on visible GPU memory:
+
+```text
+<10 GiB   PathSearcher 4,  SeqFiller 4
+10-15 GiB PathSearcher 8,  SeqFiller 8
+16-23 GiB PathSearcher 16, SeqFiller 16
+>=24 GiB  PathSearcher 32, SeqFiller 32
+```
+
+WSL defaults to `0` DataLoader workers. Native Linux defaults to PathSearcher
+`2` and SeqFiller `1`.
+
+### Tune GPU Settings
+
+```bash
+uv run rnova tune INPUT_DIR --sample-spectra 64 --max-memory-frac 0.85
+```
+
+`rnova tune` samples spectra into `.cache/rnova/tune`, benchmarks candidate
+batch sizes on PathSearcher and SeqFiller, rejects settings that exceed the
+requested peak memory fraction, and stores the selected settings in
+`.cache/rnova/tuning.json`. It does not change model weights, workflow stages,
+FDR, clustering, PTM logic, or output filenames.
 
 The workflow runs:
 
@@ -242,13 +285,13 @@ uv --cache-dir .cache/uv run rnova run ./data --dry-run --use-unimod --top-k-ptm
 
 ## Troubleshooting GPU Stalls
 
-PathSearcher and SeqFiller now run with `model.eval()` and `torch.no_grad()` during inference. If stage 2 appears stuck with high GPU memory/utilization, it is usually one of:
+PathSearcher and SeqFiller run with `model.eval()` and `torch.inference_mode()` during inference. If stage 2 appears stuck with high GPU memory/utilization, it is usually one of:
 
 - first-run CUDA/Triton/FlashAttention kernel compilation
 - a batch that is too large for the GPU
 - WSL `nvidia-smi` process accounting lagging or not showing Linux-side Python clearly
 
-Try a smaller batch and more verbose progress first:
+Try a smaller batch first:
 
 ```bash
 uv run rnova run /path/to/mgf-data \
@@ -257,11 +300,16 @@ uv run rnova run /path/to/mgf-data \
   --path-batch-size 4 \
   --seq-batch-size 4 \
   --path-num-workers 0 \
-  --seq-num-workers 0 \
-  --progress-interval 1
+  --seq-num-workers 0
 ```
 
-If that works, raise the batch sizes gradually.
+For the old detailed breadcrumbs, add:
+
+```bash
+--debug-inference --log-level debug --progress-interval 1
+```
+
+If the smaller batch works, raise the batch sizes gradually or run `rnova tune`.
 
 ## Contents
 

@@ -7,6 +7,8 @@ from pathlib import Path
 from .checkpoints import download_checkpoints
 from .errors import RNovAError
 from .pipeline import run_pipeline, setup_seqfiller_extension
+from .speed import LOG_LEVELS, PATH_CACHE_POLICIES, PROGRESS_MODES, SPEED_PROFILES
+from .tuning import run_tuning
 from .validation import VALID_DOCTOR_MODES, collect_checks, print_checks
 
 
@@ -24,32 +26,111 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_parser.add_argument("--top-k-ptms", type=int, default=10, help="Number of PTMs to pass to SeqFiller")
     run_parser.add_argument(
+        "--speed-profile",
+        choices=SPEED_PROFILES,
+        default="fast",
+        help="Runtime speed profile (default: fast)",
+    )
+    run_parser.add_argument(
+        "--progress",
+        choices=PROGRESS_MODES,
+        default="auto",
+        help="Progress bar behavior (default: auto)",
+    )
+    run_parser.add_argument(
+        "--log-level",
+        choices=LOG_LEVELS,
+        default="warning",
+        help="Subprocess log verbosity (default: warning)",
+    )
+    run_parser.add_argument(
         "--path-batch-size",
-        type=int,
-        help="Override PathSearcher inference batch size; useful for smaller GPUs",
+        default="auto",
+        help="PathSearcher inference batch size: auto or a positive integer (default: auto)",
     )
     run_parser.add_argument(
         "--path-num-workers",
-        type=int,
-        help="Override PathSearcher DataLoader worker count",
+        default="auto",
+        help="PathSearcher DataLoader workers: auto or a nonnegative integer (default: auto)",
     )
     run_parser.add_argument(
         "--seq-batch-size",
-        type=int,
-        help="Override SeqFiller inference batch size; useful for smaller GPUs",
+        default="auto",
+        help="SeqFiller inference batch size: auto or a positive integer (default: auto)",
     )
     run_parser.add_argument(
         "--seq-num-workers",
-        type=int,
-        help="Override SeqFiller DataLoader worker count",
+        default="auto",
+        help="SeqFiller DataLoader workers: auto or a nonnegative integer (default: auto)",
     )
     run_parser.add_argument(
         "--progress-interval",
         type=int,
-        help="Log PathSearcher decoder progress every N steps",
+        help="With --debug-inference, log PathSearcher decoder internals every N steps",
+    )
+    run_parser.add_argument(
+        "--debug-inference",
+        action="store_true",
+        help="Enable detailed encoder/decoder/cache diagnostics inside inference scripts",
+    )
+    run_parser.add_argument(
+        "--retune",
+        action="store_true",
+        help="Tune GPU batch settings before running",
+    )
+    run_parser.add_argument(
+        "--path-cache-policy",
+        choices=PATH_CACHE_POLICIES,
+        default="auto",
+        help="PathSearcher decoder cache allocation policy (default: auto)",
+    )
+    run_parser.add_argument(
+        "--null-workers",
+        default="auto",
+        help="Workflow null-distribution workers: auto or a positive integer (default: auto)",
+    )
+    run_parser.add_argument(
+        "--refresh-workflow-cache",
+        action="store_true",
+        help="Rebuild cached workflow null distributions",
     )
     run_parser.add_argument("--dry-run", action="store_true", help="Print planned commands without running them")
     run_parser.set_defaults(func=_run)
+
+    tune_parser = subparsers.add_parser("tune", help="Benchmark small GPU samples and cache run settings")
+    tune_parser.add_argument("input_dir", help="Directory containing input .mgf files")
+    tune_parser.add_argument("--sample-spectra", type=int, default=64, help="Number of spectra to sample")
+    tune_parser.add_argument(
+        "--max-memory-frac",
+        type=float,
+        default=0.85,
+        help="Maximum accepted peak GPU memory fraction (default: 0.85)",
+    )
+    tune_parser.add_argument(
+        "--speed-profile",
+        choices=SPEED_PROFILES,
+        default="fast",
+        help="Runtime speed profile to tune (default: fast)",
+    )
+    tune_parser.add_argument(
+        "--progress",
+        choices=PROGRESS_MODES,
+        default="auto",
+        help="Progress bar behavior during tuning (default: auto)",
+    )
+    tune_parser.add_argument(
+        "--log-level",
+        choices=LOG_LEVELS,
+        default="warning",
+        help="Subprocess log verbosity during tuning (default: warning)",
+    )
+    tune_parser.add_argument(
+        "--path-cache-policy",
+        choices=PATH_CACHE_POLICIES,
+        default="auto",
+        help="PathSearcher decoder cache allocation policy during tuning (default: auto)",
+    )
+    tune_parser.set_defaults(func=_tune)
 
     doctor_parser = subparsers.add_parser("doctor", help="Check installation and runtime readiness")
     doctor_parser.add_argument("input_dir", nargs="?", help="Optional input directory to validate")
@@ -104,8 +185,29 @@ def _run(args: argparse.Namespace) -> None:
         seq_batch_size=args.seq_batch_size,
         seq_num_workers=args.seq_num_workers,
         progress_interval=args.progress_interval,
+        speed_profile=args.speed_profile,
+        progress=args.progress,
+        log_level=args.log_level,
+        debug_inference=args.debug_inference,
+        retune=args.retune,
+        path_cache_policy=args.path_cache_policy,
+        null_workers=args.null_workers,
+        refresh_workflow_cache=args.refresh_workflow_cache,
         dry_run=args.dry_run,
     )
+
+
+def _tune(args: argparse.Namespace) -> None:
+    tuning_path = run_tuning(
+        args.input_dir,
+        sample_spectra=args.sample_spectra,
+        max_memory_frac=args.max_memory_frac,
+        speed_profile=args.speed_profile,
+        progress=args.progress,
+        log_level=args.log_level,
+        path_cache_policy=args.path_cache_policy,
+    )
+    print(f"Tuning saved: {tuning_path}")
 
 
 def _doctor(args: argparse.Namespace) -> None:
