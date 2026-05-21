@@ -31,7 +31,7 @@ def test_batch_size_for_desktop_gpu_memory_tiers() -> None:
 
 
 def test_tuning_candidates_use_desktop_scan_ladder() -> None:
-    assert candidate_batch_sizes(12) == [16, 32, 64, 128, 256, 512]
+    assert candidate_batch_sizes(12) == [8, 16, 32, 64, 128]
 
 
 def test_resolve_runtime_settings_uses_auto_defaults(monkeypatch, tmp_path: Path) -> None:
