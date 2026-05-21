@@ -94,6 +94,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Rebuild cached workflow null distributions",
     )
+    run_parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Detect the first incomplete workflow stage and continue from there",
+    )
+    run_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="With --resume, delete failed-stage outputs without prompting",
+    )
     run_parser.add_argument("--dry-run", action="store_true", help="Print planned commands without running them")
     run_parser.set_defaults(func=_run)
 
@@ -199,6 +209,8 @@ def _run(args: argparse.Namespace) -> None:
         path_cache_policy=args.path_cache_policy,
         null_workers=args.null_workers,
         refresh_workflow_cache=args.refresh_workflow_cache,
+        resume=args.resume,
+        assume_yes=args.yes,
         dry_run=args.dry_run,
     )
 

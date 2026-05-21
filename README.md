@@ -128,6 +128,19 @@ uv run rnova run /path/to/mgf-data \
   --seq-num-workers 0
 ```
 
+If a run fails after expensive intermediate stages, resume with:
+
+```bash
+uv run rnova run /path/to/mgf-data --resume --use-unimod --top-k-ptms 10
+```
+
+`--resume` detects the first incomplete stage, prints the completed stages and
+the files it will remove for the restart stage, then asks before deleting and
+continuing. Use `--yes` for non-interactive reruns. If an older run failed at
+SeqFiller before the saved top-k PTM resume state existed, RNovA reruns stage 4
+first and then continues to SeqFiller, preserving the expensive PathSearcher
+outputs.
+
 ## Commands
 
 ### Check Installation

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -242,6 +243,65 @@ def test_cli_dry_run_accepts_debug_and_cache_policy(tmp_path) -> None:
     assert "--progress off --log-level debug" in completed.stdout
 
 
+def test_cli_resume_dry_run_detects_seqfiller_failure(tmp_path) -> None:
+    root = Path(__file__).resolve().parents[1]
+    input_dir = tmp_path / "data"
+    _write_stage4_complete_outputs(input_dir, topk_state=True)
+    env = os.environ.copy()
+    env["PYTHONPATH"] = f"{root / 'src'}{os.pathsep}{root}{os.pathsep}{env.get('PYTHONPATH', '')}"
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "rnova.cli",
+            "run",
+            str(input_dir),
+            "--resume",
+            "--dry-run",
+        ],
+        cwd=root,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "Resume detection:" in completed.stdout
+    assert "Restart stage: 5/6 Run SeqFiller inference" in completed.stdout
+    assert "Reason: SeqFiller inference did not create expected files:" in completed.stdout
+
+
+def test_cli_resume_dry_run_reruns_workflow_without_topk_state(tmp_path) -> None:
+    root = Path(__file__).resolve().parents[1]
+    input_dir = tmp_path / "data"
+    _write_stage4_complete_outputs(input_dir, topk_state=False)
+    env = os.environ.copy()
+    env["PYTHONPATH"] = f"{root / 'src'}{os.pathsep}{root}{os.pathsep}{env.get('PYTHONPATH', '')}"
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "rnova.cli",
+            "run",
+            str(input_dir),
+            "--resume",
+            "--dry-run",
+        ],
+        cwd=root,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "Restart stage: 4/6 Run clustering/alignment workflow" in completed.stdout
+    assert "saved top-k PTM annotation" in completed.stdout
+
+
 def test_find_mgf_files_and_missing_extension_validation(tmp_path) -> None:
     input_dir = tmp_path / "data"
     input_dir.mkdir()
@@ -325,3 +385,36 @@ END IONS
 
     assert "Input MGF parse" in failed
     assert "intensity must be positive" in failed["Input MGF parse"]
+
+
+def _write_stage4_complete_outputs(input_dir: Path, *, topk_state: bool) -> None:
+    input_dir.mkdir()
+    mgf = input_dir / "a.mgf"
+    mgf.write_text(MGF)
+    decoy = expected_decoy_path(mgf.resolve(), input_dir.resolve() / "decoy_mgf")
+    decoy.parent.mkdir()
+    decoy.write_text(MGF)
+    _write_csv(input_dir / "a_rnova_denovo_path.csv", "scan,node_mass,score,node_class\n1,0;1,1;1,2;3\n")
+    _write_csv(
+        decoy.parent / f"{decoy.stem}_rnova_denovo_path.csv",
+        "scan,node_mass,score,node_class\n1,0;1,1;1,2;3\n",
+    )
+    _write_csv(input_dir / "a_rnova_denovo_path_001fdr.csv", "scan,node_mass,node_score\n")
+    _write_csv(input_dir / "filled_peptides.csv", "raw_sequence,filled_sequence,cluster_center\n")
+    if topk_state:
+        state_path = input_dir / ".cache" / "rnova" / "pipeline_state.json"
+        state_path.parent.mkdir(parents=True)
+        state_path.write_text(
+            json.dumps(
+                {
+                    "topk_annotation": "T[57.021464]",
+                    "use_unimod": False,
+                    "top_k_ptms": 10,
+                }
+            )
+        )
+
+
+def _write_csv(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import shlex
 import subprocess
 import sys
@@ -26,6 +27,14 @@ from .validation import (
 
 
 BASE_CANDIDATE_AMINO_ACIDS = "A;C|UniMod:4;D;E;F;G;H;K;L;M;N;P;Q;R;S;T;V;W;Y"
+STAGE_NAMES = (
+    "1/6 Generate decoy MGF files",
+    "2/6 Run PathSearcher inference",
+    "3/6 Run FDR stage 1",
+    "4/6 Run clustering/alignment workflow",
+    "5/6 Run SeqFiller inference",
+    "6/6 Run FDR stage 2",
+)
 
 
 @dataclass
@@ -36,6 +45,14 @@ class PlannedCommand:
 
     def display(self) -> str:
         return f"(cd {self.cwd} && {shlex.join(self.args)})"
+
+
+@dataclass
+class ResumePlan:
+    start_index: int | None
+    completed_steps: list[str]
+    reason: str
+    cleanup_paths: list[Path]
 
 
 def expected_decoy_path(mgf_file: Path, decoy_dir: Path) -> Path:
@@ -159,6 +176,8 @@ def run_pipeline(
     path_cache_policy: str = "auto",
     null_workers: str | int | None = "auto",
     refresh_workflow_cache: bool = False,
+    resume: bool = False,
+    assume_yes: bool = False,
     dry_run: bool = False,
 ) -> None:
     input_path = Path(input_dir).expanduser().resolve()
@@ -183,6 +202,16 @@ def run_pipeline(
 
     if dry_run:
         assert_checks_pass(collect_checks(input_path, mode="dry-run"))
+        resume_plan = None
+        if resume:
+            decoy_mgfs = [expected_decoy_path(mgf, input_path / "decoy_mgf") for mgf in mgf_files]
+            resume_plan = _prepare_resume_plan(
+                input_path,
+                mgf_files,
+                decoy_mgfs,
+                use_unimod=use_unimod,
+                top_k_ptms=top_k_ptms,
+            )
         _print_dry_run(
             input_path,
             use_unimod=use_unimod,
@@ -192,6 +221,7 @@ def run_pipeline(
             progress_interval=progress_interval,
             debug_inference=debug_inference,
             refresh_workflow_cache=refresh_workflow_cache,
+            resume_plan=resume_plan,
         )
         return
 
@@ -240,18 +270,54 @@ def run_pipeline(
     )
 
     show_command = settings.log_level == "debug"
-
-    _run(commands[0], show_command=show_command)
     decoy_mgfs = [expected_decoy_path(mgf, input_path / "decoy_mgf") for mgf in mgf_files]
-    _require_files("decoy generation", decoy_mgfs)
+    start_index = 0
+    if resume:
+        resume_plan = _prepare_resume_plan(
+            input_path,
+            mgf_files,
+            decoy_mgfs,
+            use_unimod=use_unimod,
+            top_k_ptms=top_k_ptms,
+        )
+        if resume_plan.start_index is None:
+            print("Resume detected that all workflow stages already have valid outputs.")
+            return
+        _confirm_resume(resume_plan, assume_yes=assume_yes)
+        _cleanup_resume_outputs(resume_plan.cleanup_paths)
+        start_index = resume_plan.start_index
 
-    _run(commands[1], show_command=show_command)
-    _validate_pathsearcher_outputs(mgf_files, decoy_mgfs)
-    _run(commands[2], show_command=show_command)
-    _validate_fdr_stage1_outputs(mgf_files)
-    workflow_output = _run(commands[3], capture_stdout=True, show_command=show_command, echo_stdout=show_command)
-    _validate_workflow_outputs(input_path)
-    topk_annotation = _parse_topk_annotation(workflow_output)
+    if start_index <= 0:
+        _run(commands[0], show_command=show_command)
+        _require_files("decoy generation", decoy_mgfs)
+
+    if start_index <= 1:
+        _run(commands[1], show_command=show_command)
+        _validate_pathsearcher_outputs(mgf_files, decoy_mgfs)
+    if start_index <= 2:
+        _run(commands[2], show_command=show_command)
+        _validate_fdr_stage1_outputs(mgf_files)
+    if start_index <= 3:
+        workflow_output = _run(commands[3], capture_stdout=True, show_command=show_command, echo_stdout=show_command)
+        _validate_workflow_outputs(input_path)
+        topk_annotation = _parse_topk_annotation(workflow_output)
+        _write_pipeline_state(
+            input_path,
+            topk_annotation=topk_annotation,
+            use_unimod=use_unimod,
+            top_k_ptms=top_k_ptms,
+        )
+    else:
+        topk_annotation = _read_pipeline_state(
+            input_path,
+            use_unimod=use_unimod,
+            top_k_ptms=top_k_ptms,
+        )
+        if topk_annotation is None and start_index <= 4:
+            raise RNovAError(
+                "Cannot resume SeqFiller because the saved top-k PTM annotation is missing. "
+                "Rerun with `--resume` so stage 4 can be regenerated."
+            )
     seq_command = build_commands(
         input_path,
         use_unimod=use_unimod,
@@ -271,10 +337,12 @@ def run_pipeline(
         refresh_workflow_cache=refresh_workflow_cache,
         topk_annotation=topk_annotation,
     )[4]
-    _run(seq_command, show_command=show_command)
-    _validate_seqfiller_outputs(mgf_files, decoy_mgfs)
-    _run(commands[5], show_command=show_command)
-    _validate_fdr_stage2_outputs(mgf_files)
+    if start_index <= 4:
+        _run(seq_command, show_command=show_command)
+        _validate_seqfiller_outputs(mgf_files, decoy_mgfs)
+    if start_index <= 5:
+        _run(commands[5], show_command=show_command)
+        _validate_fdr_stage2_outputs(mgf_files)
     print(f"RNovA workflow finished for {len(mgf_files)} input MGF file(s).")
 
 
@@ -317,6 +385,187 @@ def _validate_vendor_files() -> None:
     missing = [str(path) for path in REQUIRED_VENDOR_FILES if not path.exists()]
     if missing:
         raise RNovAError("Vendored RNovA files are missing:\n" + "\n".join(missing))
+
+
+def _prepare_resume_plan(
+    input_path: Path,
+    mgf_files: list[Path],
+    decoy_mgfs: list[Path],
+    *,
+    use_unimod: bool,
+    top_k_ptms: int,
+) -> ResumePlan:
+    completed_steps: list[str] = []
+    start_index: int | None = None
+    reason = "all expected outputs are present"
+    for index, step in enumerate(STAGE_NAMES):
+        ok, detail = _stage_complete(index, input_path, mgf_files, decoy_mgfs)
+        if ok:
+            completed_steps.append(step)
+            continue
+        start_index = index
+        reason = detail
+        break
+
+    if start_index is None:
+        return ResumePlan(None, completed_steps, reason, [])
+
+    if start_index == 4 and _read_pipeline_state(
+        input_path,
+        use_unimod=use_unimod,
+        top_k_ptms=top_k_ptms,
+    ) is None:
+        start_index = 3
+        reason = (
+            "SeqFiller outputs are missing, and the saved top-k PTM annotation "
+            "from stage 4 is not available; stage 4 must be regenerated first"
+        )
+        completed_steps = completed_steps[:3]
+        cleanup_paths = [
+            *_stage_output_paths(3, input_path, mgf_files, decoy_mgfs),
+            *_stage_output_paths(4, input_path, mgf_files, decoy_mgfs),
+        ]
+        return ResumePlan(start_index, completed_steps, reason, cleanup_paths)
+
+    cleanup_paths = _stage_output_paths(start_index, input_path, mgf_files, decoy_mgfs)
+    return ResumePlan(start_index, completed_steps, reason, cleanup_paths)
+
+
+def _stage_complete(
+    index: int,
+    input_path: Path,
+    mgf_files: list[Path],
+    decoy_mgfs: list[Path],
+) -> tuple[bool, str]:
+    try:
+        if index == 0:
+            _require_files("decoy generation", decoy_mgfs)
+        elif index == 1:
+            _validate_pathsearcher_outputs(mgf_files, decoy_mgfs)
+        elif index == 2:
+            _validate_fdr_stage1_outputs(mgf_files)
+        elif index == 3:
+            _validate_workflow_outputs(input_path)
+        elif index == 4:
+            _validate_seqfiller_outputs(mgf_files, decoy_mgfs)
+        elif index == 5:
+            _validate_fdr_stage2_outputs(mgf_files)
+        else:
+            raise ValueError(index)
+    except RNovAError as exc:
+        return False, str(exc)
+    return True, "ok"
+
+
+def _stage_output_paths(
+    index: int,
+    input_path: Path,
+    mgf_files: list[Path],
+    decoy_mgfs: list[Path],
+) -> list[Path]:
+    if index == 0:
+        return decoy_mgfs
+    if index == 1:
+        return [_path_output(path) for path in [*mgf_files, *decoy_mgfs]]
+    if index == 2:
+        return [_path_fdr_output(path) for path in mgf_files]
+    if index == 3:
+        return [
+            input_path / "filled_peptides.csv",
+            input_path / "filled_peptides_with_PTM.csv",
+            _pipeline_state_path(input_path),
+        ]
+    if index == 4:
+        return [_seq_output(path) for path in [*mgf_files, *decoy_mgfs]]
+    if index == 5:
+        return [_seq_fdr_output(path) for path in mgf_files]
+    raise ValueError(index)
+
+
+def _confirm_resume(plan: ResumePlan, *, assume_yes: bool) -> None:
+    assert plan.start_index is not None
+    _print_resume_plan(plan)
+    if assume_yes:
+        return
+    if not sys.stdin.isatty():
+        raise RNovAError("Resume needs confirmation; rerun with --yes to skip the prompt")
+    answer = input("Delete those failed-stage outputs and continue? [y/N] ").strip().lower()
+    if answer not in {"y", "yes"}:
+        raise RNovAError("Resume cancelled")
+
+
+def _print_resume_plan(plan: ResumePlan) -> None:
+    if plan.start_index is None:
+        print("Resume detected a complete workflow; no stage needs to run.")
+        return
+    print("Resume detection:")
+    if plan.completed_steps:
+        print("  Completed stages:")
+        for step in plan.completed_steps:
+            print(f"    {step}")
+    else:
+        print("  Completed stages: none")
+    print(f"  Restart stage: {STAGE_NAMES[plan.start_index]}")
+    print(f"  Reason: {plan.reason}")
+    existing_cleanup = [path for path in plan.cleanup_paths if path.exists()]
+    if existing_cleanup:
+        print("  Outputs to remove before restarting this stage:")
+        for path in existing_cleanup:
+            print(f"    {path}")
+    else:
+        print("  Outputs to remove before restarting this stage: none found")
+
+
+def _cleanup_resume_outputs(paths: list[Path]) -> None:
+    for path in paths:
+        try:
+            if path.is_file():
+                path.unlink()
+        except OSError as exc:
+            raise RNovAError(f"Could not remove failed-stage output {path}: {exc}") from exc
+
+
+def _pipeline_state_path(input_path: Path) -> Path:
+    return input_path / ".cache" / "rnova" / "pipeline_state.json"
+
+
+def _write_pipeline_state(
+    input_path: Path,
+    *,
+    topk_annotation: str,
+    use_unimod: bool,
+    top_k_ptms: int,
+) -> None:
+    state_path = _pipeline_state_path(input_path)
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "topk_annotation": topk_annotation,
+        "use_unimod": use_unimod,
+        "top_k_ptms": top_k_ptms,
+    }
+    tmp_path = state_path.with_suffix(f"{state_path.suffix}.tmp")
+    tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    tmp_path.replace(state_path)
+
+
+def _read_pipeline_state(
+    input_path: Path,
+    *,
+    use_unimod: bool,
+    top_k_ptms: int,
+) -> str | None:
+    try:
+        payload = json.loads(_pipeline_state_path(input_path).read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    if payload.get("use_unimod") != use_unimod:
+        return None
+    if payload.get("top_k_ptms") != top_k_ptms:
+        return None
+    topk_annotation = payload.get("topk_annotation")
+    if not isinstance(topk_annotation, str):
+        return None
+    return topk_annotation
 
 
 def _validate_runtime(input_path: Path) -> None:
@@ -440,6 +689,7 @@ def _print_dry_run(
     progress_interval: int | None,
     debug_inference: bool,
     refresh_workflow_cache: bool,
+    resume_plan: ResumePlan | None = None,
 ) -> None:
     print(f"Input directory: {input_path}")
     print(f"Input MGF files found: {len(find_mgf_files(input_path))}")
@@ -454,6 +704,9 @@ def _print_dry_run(
     print(f"SeqFiller batch/workers: {settings.seq_batch_size}/{settings.seq_num_workers}")
     print(f"PathSearcher cache policy: {settings.path_cache_policy}")
     print(f"Workflow null workers: {settings.null_workers}")
+    if resume_plan is not None:
+        print()
+        _print_resume_plan(resume_plan)
     print()
     for command in build_commands(
         input_path,
