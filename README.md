@@ -9,7 +9,7 @@ The recommended entry point is the root `rnova` CLI.
 On any machine, including a non-GPU laptop, the lightweight workflow should work:
 
 ```bash
-git clone <your-rnova-repo-url>
+git clone https://github.com/dennissv/RNovA.git
 cd RNovA
 uv sync
 uv run rnova --help
@@ -52,7 +52,7 @@ nvidia-smi
 3. Clone this repo and install the inference environment:
 
 ```bash
-git clone <your-rnova-repo-url>
+git clone https://github.com/dennissv/RNovA.git
 cd RNovA
 uv sync --extra inference --extra flash
 ```
