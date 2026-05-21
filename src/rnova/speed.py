@@ -233,7 +233,7 @@ def cuda_device_info() -> dict[str, Any]:
 
 
 def candidate_batch_sizes(total_memory_gib: float | None = None) -> list[int]:
-    return [4, 8, 16, 32, 64]
+    return [16, 32, 64, 128, 256, 512]
 
 
 def _resolve_auto_int(
