@@ -23,6 +23,31 @@ def build_parser() -> argparse.ArgumentParser:
         help="Refresh cached UniMod XML during workflow annotation",
     )
     run_parser.add_argument("--top-k-ptms", type=int, default=10, help="Number of PTMs to pass to SeqFiller")
+    run_parser.add_argument(
+        "--path-batch-size",
+        type=int,
+        help="Override PathSearcher inference batch size; useful for smaller GPUs",
+    )
+    run_parser.add_argument(
+        "--path-num-workers",
+        type=int,
+        help="Override PathSearcher DataLoader worker count",
+    )
+    run_parser.add_argument(
+        "--seq-batch-size",
+        type=int,
+        help="Override SeqFiller inference batch size; useful for smaller GPUs",
+    )
+    run_parser.add_argument(
+        "--seq-num-workers",
+        type=int,
+        help="Override SeqFiller DataLoader worker count",
+    )
+    run_parser.add_argument(
+        "--progress-interval",
+        type=int,
+        help="Log PathSearcher decoder progress every N steps",
+    )
     run_parser.add_argument("--dry-run", action="store_true", help="Print planned commands without running them")
     run_parser.set_defaults(func=_run)
 
@@ -74,6 +99,11 @@ def _run(args: argparse.Namespace) -> None:
         use_unimod=args.use_unimod,
         refresh_unimod=args.refresh_unimod,
         top_k_ptms=args.top_k_ptms,
+        path_batch_size=args.path_batch_size,
+        path_num_workers=args.path_num_workers,
+        seq_batch_size=args.seq_batch_size,
+        seq_num_workers=args.seq_num_workers,
+        progress_interval=args.progress_interval,
         dry_run=args.dry_run,
     )
 

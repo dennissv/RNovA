@@ -46,6 +46,11 @@ def build_commands(
     use_unimod: bool,
     refresh_unimod: bool = False,
     top_k_ptms: int,
+    path_batch_size: int | None = None,
+    path_num_workers: int | None = None,
+    seq_batch_size: int | None = None,
+    seq_num_workers: int | None = None,
+    progress_interval: int | None = None,
     topk_annotation: str = "<topk_ptm_annotation from workflow>",
 ) -> list[PlannedCommand]:
     input_path = Path(input_dir).expanduser().resolve()
@@ -63,6 +68,22 @@ def build_commands(
     if topk_annotation:
         candidate_amino_acids = f"{candidate_amino_acids};{topk_annotation}"
 
+    pathsearcher_args = [sys.executable, "Inference_Node.py"]
+    if path_batch_size is not None:
+        pathsearcher_args.extend(["--batch-size", str(path_batch_size)])
+    if path_num_workers is not None:
+        pathsearcher_args.extend(["--num-workers", str(path_num_workers)])
+    if progress_interval is not None:
+        pathsearcher_args.extend(["--progress-interval", str(progress_interval)])
+    pathsearcher_args.extend([*map(str, mgf_files), *map(str, decoy_mgfs)])
+
+    seqfiller_args = [sys.executable, "Inference_Sequence.py"]
+    if seq_batch_size is not None:
+        seqfiller_args.extend(["--batch-size", str(seq_batch_size)])
+    if seq_num_workers is not None:
+        seqfiller_args.extend(["--num-workers", str(seq_num_workers)])
+    seqfiller_args.extend([*map(str, mgf_files), *map(str, decoy_mgfs), candidate_amino_acids])
+
     return [
         PlannedCommand(
             "1/6 Generate decoy MGF files",
@@ -71,7 +92,7 @@ def build_commands(
         ),
         PlannedCommand(
             "2/6 Run PathSearcher inference",
-            [sys.executable, "Inference_Node.py", *map(str, mgf_files), *map(str, decoy_mgfs)],
+            pathsearcher_args,
             PATHSEARCHER_DIR,
         ),
         PlannedCommand(
@@ -86,7 +107,7 @@ def build_commands(
         ),
         PlannedCommand(
             "5/6 Run SeqFiller inference",
-            [sys.executable, "Inference_Sequence.py", *map(str, mgf_files), *map(str, decoy_mgfs), candidate_amino_acids],
+            seqfiller_args,
             SEQFILLER_DIR,
         ),
         PlannedCommand(
@@ -103,11 +124,21 @@ def run_pipeline(
     use_unimod: bool,
     top_k_ptms: int,
     refresh_unimod: bool = False,
+    path_batch_size: int | None = None,
+    path_num_workers: int | None = None,
+    seq_batch_size: int | None = None,
+    seq_num_workers: int | None = None,
+    progress_interval: int | None = None,
     dry_run: bool = False,
 ) -> None:
     input_path = Path(input_dir).expanduser().resolve()
     if top_k_ptms <= 0:
         raise RNovAError("--top-k-ptms must be greater than 0")
+    _validate_positive_optional("--path-batch-size", path_batch_size)
+    _validate_nonnegative_optional("--path-num-workers", path_num_workers)
+    _validate_positive_optional("--seq-batch-size", seq_batch_size)
+    _validate_nonnegative_optional("--seq-num-workers", seq_num_workers)
+    _validate_positive_optional("--progress-interval", progress_interval)
     mgf_files = _validate_input(input_path)
     _validate_vendor_files()
 
@@ -118,6 +149,11 @@ def run_pipeline(
             use_unimod=use_unimod,
             refresh_unimod=refresh_unimod,
             top_k_ptms=top_k_ptms,
+            path_batch_size=path_batch_size,
+            path_num_workers=path_num_workers,
+            seq_batch_size=seq_batch_size,
+            seq_num_workers=seq_num_workers,
+            progress_interval=progress_interval,
         )
         return
 
@@ -128,6 +164,11 @@ def run_pipeline(
         use_unimod=use_unimod,
         refresh_unimod=refresh_unimod,
         top_k_ptms=top_k_ptms,
+        path_batch_size=path_batch_size,
+        path_num_workers=path_num_workers,
+        seq_batch_size=seq_batch_size,
+        seq_num_workers=seq_num_workers,
+        progress_interval=progress_interval,
     )
 
     _run(commands[0])
@@ -146,6 +187,11 @@ def run_pipeline(
         use_unimod=use_unimod,
         refresh_unimod=refresh_unimod,
         top_k_ptms=top_k_ptms,
+        path_batch_size=path_batch_size,
+        path_num_workers=path_num_workers,
+        seq_batch_size=seq_batch_size,
+        seq_num_workers=seq_num_workers,
+        progress_interval=progress_interval,
         topk_annotation=topk_annotation,
     )[4]
     _run(seq_command)
@@ -175,6 +221,16 @@ def _validate_input(input_path: Path) -> list[Path]:
     if not mgf_files:
         raise RNovAError(f"No .mgf files found in {input_path}")
     return mgf_files
+
+
+def _validate_positive_optional(name: str, value: int | None) -> None:
+    if value is not None and value <= 0:
+        raise RNovAError(f"{name} must be greater than 0")
+
+
+def _validate_nonnegative_optional(name: str, value: int | None) -> None:
+    if value is not None and value < 0:
+        raise RNovAError(f"{name} must be greater than or equal to 0")
 
 
 def _validate_vendor_files() -> None:
@@ -300,6 +356,11 @@ def _print_dry_run(
     use_unimod: bool,
     refresh_unimod: bool,
     top_k_ptms: int,
+    path_batch_size: int | None,
+    path_num_workers: int | None,
+    seq_batch_size: int | None,
+    seq_num_workers: int | None,
+    progress_interval: int | None,
 ) -> None:
     print(f"Input directory: {input_path}")
     print(f"Input MGF files found: {len(find_mgf_files(input_path))}")
@@ -312,6 +373,11 @@ def _print_dry_run(
         use_unimod=use_unimod,
         refresh_unimod=refresh_unimod,
         top_k_ptms=top_k_ptms,
+        path_batch_size=path_batch_size,
+        path_num_workers=path_num_workers,
+        seq_batch_size=seq_batch_size,
+        seq_num_workers=seq_num_workers,
+        progress_interval=progress_interval,
     ):
         print(f"{command.step}:")
         print(f"  {command.display()}")

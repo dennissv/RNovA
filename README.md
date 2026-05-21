@@ -83,6 +83,19 @@ uv run rnova doctor --mode inference /path/to/mgf-data
 uv run rnova run /path/to/mgf-data --use-unimod --top-k-ptms 10
 ```
 
+For 12 GiB cards such as a 4070 Ti, start with smaller inference batches:
+
+```bash
+uv run rnova run /path/to/mgf-data \
+  --use-unimod \
+  --top-k-ptms 10 \
+  --path-batch-size 8 \
+  --seq-batch-size 8 \
+  --path-num-workers 0 \
+  --seq-num-workers 0 \
+  --progress-interval 2
+```
+
 ## Commands
 
 ### Check Installation
@@ -160,6 +173,13 @@ uv run rnova run INPUT_DIR --use-unimod --top-k-ptms 10
 
 Use `--refresh-unimod` with `--use-unimod` to refresh the cached UniMod XML before annotation.
 
+Useful GPU/runtime controls:
+
+- `--path-batch-size N`: lower PathSearcher batch size when GPU memory is tight.
+- `--seq-batch-size N`: lower SeqFiller batch size when GPU memory is tight.
+- `--path-num-workers N` and `--seq-num-workers N`: set DataLoader workers; `0` is easier to debug under WSL.
+- `--progress-interval N`: log PathSearcher decoder progress every N decoder steps inside a batch.
+
 The workflow runs:
 
 1. Decoy MGF generation
@@ -219,6 +239,29 @@ uv --cache-dir .cache/uv run rnova run ./data --dry-run --use-unimod --top-k-ptm
 - This repository vendors the former PathSearcher and SeqFiller submodules as normal directories for simpler personal use.
 - Default `uv sync` is intentionally lightweight so CLI help, doctor, and dry-runs work on non-GPU laptops. Install `--extra inference --extra flash` only on the Linux/GPU machine where you plan to run the models.
 - The root CLI uses absolute paths when invoking module scripts, so `./data` remains valid even when a stage runs from inside a module directory.
+
+## Troubleshooting GPU Stalls
+
+PathSearcher and SeqFiller now run with `model.eval()` and `torch.no_grad()` during inference. If stage 2 appears stuck with high GPU memory/utilization, it is usually one of:
+
+- first-run CUDA/Triton/FlashAttention kernel compilation
+- a batch that is too large for the GPU
+- WSL `nvidia-smi` process accounting lagging or not showing Linux-side Python clearly
+
+Try a smaller batch and more verbose progress first:
+
+```bash
+uv run rnova run /path/to/mgf-data \
+  --use-unimod \
+  --top-k-ptms 10 \
+  --path-batch-size 4 \
+  --seq-batch-size 4 \
+  --path-num-workers 0 \
+  --seq-num-workers 0 \
+  --progress-interval 1
+```
+
+If that works, raise the batch sizes gradually.
 
 ## Contents
 

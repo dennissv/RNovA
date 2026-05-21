@@ -42,6 +42,33 @@ def test_build_commands_can_refresh_unimod(tmp_path) -> None:
     assert "--refresh-unimod" in commands[3].args
 
 
+def test_build_commands_can_override_inference_batch_sizes(tmp_path) -> None:
+    input_dir = tmp_path / "data"
+    input_dir.mkdir()
+    (input_dir / "a.mgf").write_text(MGF)
+
+    commands = build_commands(
+        input_dir,
+        use_unimod=False,
+        top_k_ptms=10,
+        path_batch_size=8,
+        path_num_workers=0,
+        seq_batch_size=4,
+        seq_num_workers=0,
+        progress_interval=2,
+    )
+
+    assert commands[1].args[2:8] == [
+        "--batch-size",
+        "8",
+        "--num-workers",
+        "0",
+        "--progress-interval",
+        "2",
+    ]
+    assert commands[4].args[2:6] == ["--batch-size", "4", "--num-workers", "0"]
+
+
 def test_cli_dry_run_prints_planned_commands(tmp_path) -> None:
     root = Path(__file__).resolve().parents[1]
     input_dir = tmp_path / "data"
@@ -103,6 +130,45 @@ def test_cli_rejects_non_positive_top_k(tmp_path) -> None:
 
     assert completed.returncode == 1
     assert "--top-k-ptms must be greater than 0" in completed.stderr
+
+
+def test_cli_dry_run_prints_batch_overrides(tmp_path) -> None:
+    root = Path(__file__).resolve().parents[1]
+    input_dir = tmp_path / "data"
+    input_dir.mkdir()
+    (input_dir / "a.mgf").write_text(MGF)
+    env = os.environ.copy()
+    env["PYTHONPATH"] = f"{root / 'src'}{os.pathsep}{root}{os.pathsep}{env.get('PYTHONPATH', '')}"
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "rnova.cli",
+            "run",
+            str(input_dir),
+            "--dry-run",
+            "--path-batch-size",
+            "8",
+            "--path-num-workers",
+            "0",
+            "--seq-batch-size",
+            "4",
+            "--seq-num-workers",
+            "0",
+            "--progress-interval",
+            "2",
+        ],
+        cwd=root,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "Inference_Node.py --batch-size 8 --num-workers 0 --progress-interval 2" in completed.stdout
+    assert "Inference_Sequence.py --batch-size 4 --num-workers 0" in completed.stdout
 
 
 def test_find_mgf_files_and_missing_extension_validation(tmp_path) -> None:

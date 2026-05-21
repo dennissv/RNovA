@@ -4,11 +4,13 @@ import numpy as np
 from math import ceil
 
 class Environment(object):
-    def __init__(self, cfg, model, inference_dl, device):
+    def __init__(self, cfg, model, inference_dl, device, logger=None, progress_interval=10):
         self.cfg = cfg
         self.model = model
         self.inference_dl_ori = inference_dl
         self.device = device
+        self.logger = logger
+        self.progress_interval = progress_interval
         self.generator = torch.Generator('cuda')
         self.generator.manual_seed(0)
         kernel_size = 3
@@ -22,17 +24,37 @@ class Environment(object):
         decoder_step_input, node, next_node_mask, title, node_mass_output = self.exploration_initializing()
         decoder_step_input, next_node_mask = self.next_aa_choice(node, next_node_mask, decoder_step_input)
 
+        decoder_steps = 1
         while next_node_mask!=None:
+            if self.logger and decoder_steps % self.progress_interval == 0:
+                self.logger.info(
+                    "PathSearcher decoder step %s: active_spectra=%s, cuda_allocated=%.2f GiB, cuda_reserved=%.2f GiB",
+                    decoder_steps,
+                    int(self.remain_index.numel()),
+                    torch.cuda.memory_allocated(self.device) / 1024**3,
+                    torch.cuda.memory_reserved(self.device) / 1024**3,
+                )
             node = self.model(**decoder_step_input)
             decoder_step_input, next_node_mask = self.next_aa_choice(node, next_node_mask, decoder_step_input)
+            decoder_steps += 1
 
         #nterm_node_seq_list, nterm_score_seq_list, nterm_class_seq_list, cterm_node_seq_list, cterm_score_seq_list, cterm_class_seq_list = self.result_generation()
         #return nterm_node_seq_list, nterm_score_seq_list, nterm_class_seq_list, cterm_node_seq_list, cterm_score_seq_list, cterm_class_seq_list, title, node_mass_output.cpu().numpy()
         node_seq_list, score_seq_list, class_seq_list = self.result_generation()
+        if self.logger:
+            self.logger.info("PathSearcher batch completed after %s decoder step(s)", decoder_steps)
         return node_seq_list, score_seq_list, class_seq_list, title, node_mass_output.cpu().numpy()
 
     def exploration_initializing(self):
         node_input, node_mask, title = next(self.inference_dl)
+        if self.logger:
+            self.logger.info(
+                "PathSearcher batch received: spectra=%s, padded_nodes=%s, cuda_allocated=%.2f GiB, cuda_reserved=%.2f GiB",
+                node_mask.size(0),
+                node_mask.size(1),
+                torch.cuda.memory_allocated(self.device) / 1024**3,
+                torch.cuda.memory_reserved(self.device) / 1024**3,
+            )
         self.node_class = node_input['node_class']
         self.node_mass = node_input['node_mass']
         self.node_last_mass = self.node_mass[self.node_class==3].cpu().numpy()
@@ -67,7 +89,20 @@ class Environment(object):
                                            dtype=torch.float16,
                                            device=self.device)
 
+        if self.logger:
+            cache_gib = (
+                self.decoder_k_cache.numel() * self.decoder_k_cache.element_size()
+                + self.decoder_v_cache.numel() * self.decoder_v_cache.element_size()
+            ) / 1024**3
+            self.logger.info(
+                "PathSearcher decoder cache allocated: %.2f GiB, max_cache_seq_len=%s",
+                cache_gib,
+                max_cache_seq_len,
+            )
+            self.logger.info("PathSearcher encoder forward starting")
         k_cache, v_cache, node_embedding = self.model.encoder_forward(**node_input)
+        if self.logger:
+            self.logger.info("PathSearcher encoder forward finished; initial decoder forward starting")
 
         decoder_step_input = {
             'node_index': self.node_index,
@@ -82,6 +117,8 @@ class Environment(object):
             'decoder_v_cache': self.decoder_v_cache
         }
         node = self.model(**decoder_step_input)
+        if self.logger:
+            self.logger.info("PathSearcher initial decoder forward finished")
         next_node_mask = self.step_label_generation(self.node_index)
         return decoder_step_input, node, next_node_mask, title, node_mass_output
 

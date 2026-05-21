@@ -3,7 +3,7 @@ import collections
 from typing import Union
 
 class DataPrefetcher:
-    def __init__(self, loader, device: Union[int, torch.device]):
+    def __init__(self, loader, device: Union[int, torch.device], logger=None):
         """Data Prefetcher for prefetch data to GPU.
 
         Args:
@@ -15,11 +15,21 @@ class DataPrefetcher:
         """
         self.device = device
         self.loader = loader
+        self.logger = logger
         self.stream = torch.cuda.Stream(device=device)
 
     def preload(self):
-        self.batch = next(self.loader_iter)
+        if self.logger:
+            self.logger.info("Loading next PathSearcher batch onto CUDA")
+        try:
+            self.batch = next(self.loader_iter)
+        except StopIteration:
+            if self.logger:
+                self.logger.info("No more PathSearcher batches to load")
+            raise
         self.batch = self.to_cuda(self.batch)
+        if self.logger:
+            self.logger.info("Next PathSearcher batch is resident on CUDA")
 
     def __iter__(self):
         self.loader_iter = iter(self.loader)
