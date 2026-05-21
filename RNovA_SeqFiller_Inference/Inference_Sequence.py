@@ -103,13 +103,16 @@ def main(argv=None):
     started_at = time.perf_counter()
     total_spectra = 0
     output_files = 0
-    torch.cuda.reset_peak_memory_stats(0)
 
     with initialize(config_path="configs", version_base=None): cfg = compose(config_name="config")
     if args.batch_size is not None:
         cfg.train.batch_size = args.batch_size
     local_rank = 0
-    torch.cuda.set_device(local_rank)
+    try:
+        torch.cuda.set_device(local_rank)
+    except RuntimeError as exc:
+        raise SystemExit(f"Could not select CUDA device {local_rank}: {exc}") from exc
+    _reset_peak_memory_stats(local_rank)
     device_props = torch.cuda.get_device_properties(local_rank)
     logger.debug(
         "CUDA device %s: %s, %.1f GiB total memory",
@@ -187,7 +190,7 @@ def main(argv=None):
         "elapsed_seconds": elapsed,
         "spectra": total_spectra,
         "spectra_per_second": total_spectra / elapsed if elapsed > 0 else 0.0,
-        "peak_memory_gib": torch.cuda.max_memory_allocated(0) / 1024**3,
+        "peak_memory_gib": _peak_memory_gib(local_rank),
         "batch_size": cfg.train.batch_size,
         "num_workers": args.num_workers,
         "speed_profile": args.speed_profile,
@@ -215,6 +218,22 @@ def _apply_speed_profile(profile: str) -> None:
     torch.set_float32_matmul_precision("high")
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
+
+
+def _reset_peak_memory_stats(device: int) -> None:
+    try:
+        torch.cuda.reset_peak_memory_stats(device)
+    except RuntimeError as exc:
+        logger.debug("Could not reset CUDA peak memory stats for device %s: %s", device, exc)
+
+
+def _peak_memory_gib(device: int) -> float:
+    try:
+        return torch.cuda.max_memory_allocated(device) / 1024**3
+    except RuntimeError as exc:
+        logger.debug("Could not read CUDA peak memory stats for device %s: %s", device, exc)
+        return 0.0
+
 
 if __name__ == "__main__":
     main()
