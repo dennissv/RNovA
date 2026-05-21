@@ -26,14 +26,15 @@ class Environment(object):
         for aa in candidate_amino_acids:
             try:
                 candidate_aa.append(self.candidate_ptm_aa[aa])
-            except:
-                new_temp_aa = Residual_AA(aa[:aa.find('[')],
+            except KeyError:
+                residue, delta_mass = _parse_dynamic_candidate_aa(aa, self.candidate_ptm_aa)
+                new_temp_aa = Residual_AA(residue,
                                           n_terminal_PTM='',
                                           c_terminal_PTM='',
-                                          r_group_PTM=aa[aa.find('[')+1:-1],
+                                          r_group_PTM=str(delta_mass),
                                           embedding_db_index=len(self.candidate_ptm_aa)+3,
                                           composition=None,
-                                          mass=float(aa[aa.find('[')+1:-1])+self.candidate_ptm_aa[aa[0]].mass,
+                                          mass=delta_mass+self.candidate_ptm_aa[residue].mass,
                                           full_name=aa)
                 self.candidate_ptm_aa.add_residue(aa,new_temp_aa)
                 candidate_aa.append(self.candidate_ptm_aa[aa])
@@ -197,3 +198,20 @@ class Environment(object):
                 result[i] += [self.candidate_ptm_aa[aa]]
                 result_score[i] += [aa_score]
         return result, result_score
+
+
+def _parse_dynamic_candidate_aa(aa, candidate_ptm_aa):
+    if '[' not in aa or not aa.endswith(']'):
+        raise ValueError(
+            f"Unsupported SeqFiller candidate amino acid {aa!r}. Expected a built-in "
+            "residue token such as 'C|UniMod:4' or a dynamic mass token such as 'T[57.021464]'."
+        )
+    residue, raw_delta = aa.split('[', 1)
+    raw_delta = raw_delta[:-1]
+    if len(residue) != 1 or residue not in candidate_ptm_aa:
+        raise ValueError(f"Unsupported SeqFiller candidate residue in {aa!r}")
+    try:
+        delta_mass = float(raw_delta)
+    except ValueError as exc:
+        raise ValueError(f"Dynamic SeqFiller candidate {aa!r} has non-numeric mass delta") from exc
+    return residue, delta_mass

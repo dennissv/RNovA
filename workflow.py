@@ -12,7 +12,12 @@ from pathlib import Path
 from src.null_background_ngram import build_null_distribution
 from src.clustering import cdhit_style_cluster_numba_masstag, nw_masstag_numba
 from src.alignment import *
-from src.fill_PTM import load_unimod, UniModMassIndex, fill_delta_with_unimod,parse_peptide_mods
+from src.fill_PTM import (
+    UniModMassIndex,
+    delta_to_unimod_candidates,
+    load_unimod,
+    parse_peptide_mods,
+)
 from src.DBSCAN1D import DBSCAN1D
 import numpy as np
 import pandas as pd
@@ -241,20 +246,38 @@ def delta_mass_to_ptm(filled_result: pd.DataFrame, index: UniModMassIndex, k, to
     ptm_freq = dict()
     for row in filled_result.itertuples():
         pep = row.filled_sequence
-        mods_residue, mods_name = fill_delta_with_unimod(pep, index, tol=tol)
-        if mods_residue is not None:
-            mods_residue = ";".join(mods_residue)
-            mods_name = ";".join(mods_name)
+        mods_residue = []
+        mods_name = []
+        seqfiller_ptms = []
+        for mod in parse_peptide_mods(pep):
+            if mod["unimod_id"] is not None:
+                continue
+            candidates = delta_to_unimod_candidates(
+                index,
+                mod["residue"],
+                mod["delta_mass"],
+                tol=tol,
+            )
+            if not candidates:
+                continue
+            candidate = candidates[0]
+            mods_residue.append(f"{mod['residue']}{mod['index'] + 1}")
+            mods_name.append(f"{candidate['title']}|UniMod:{candidate['unimod_id']}")
+            seqfiller_ptms.append(_seqfiller_ptm_token(mod["residue"], candidate["mono_mass"]))
+        if mods_residue:
+            mods_residue_text = ";".join(mods_residue)
+            mods_name_text = ";".join(mods_name)
             new_row = row._asdict()
-            new_row["mod_residue"] = mods_residue
-            new_row["mod_name"] = mods_name
-            ptm = mods_residue[0]+'|'+mods_name.split('|')[-1]
+            new_row["mod_residue"] = mods_residue_text
+            new_row["mod_name"] = mods_name_text
+            ptm = seqfiller_ptms[0]
             df_ptm = pd.concat([df_ptm, pd.DataFrame([new_row])], ignore_index=True)
-            if ptm in ptm_freq.keys():
-                ptm_freq[ptm] += 1
-            else:
-                ptm_freq[ptm] = 1
+            ptm_freq[ptm] = ptm_freq.get(ptm, 0) + 1
     return df_ptm, ptm_freq
+
+
+def _seqfiller_ptm_token(residue, mono_mass):
+    return f"{residue}[{float(mono_mass):.6f}]"
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run the peptide clustering and optional UniMod annotation workflow.")
